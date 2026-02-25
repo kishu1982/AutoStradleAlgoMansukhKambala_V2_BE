@@ -9,6 +9,7 @@ import * as path from 'path';
 import { InstrumentInfo } from './interfaces/local-instrumentInfo-interface';
 import { ExchangeOrder } from '../exchange-data/exchange-entities/exchange-order.entity';
 import { AutoStradleRMSService } from './auto-stradle-rms.service';
+import { MarketService } from './../../market/market.service';
 
 @Injectable()
 export class AutoStradleExecutionService implements OnModuleInit {
@@ -26,6 +27,7 @@ export class AutoStradleExecutionService implements OnModuleInit {
     private readonly autoStradleService: AutoStradleStrategyService,
     private readonly exchangeDataService: ExchangeDataService,
     private readonly rmsService: AutoStradleRMSService,
+    private readonly marketService: MarketService,
   ) {
     this.executionEnabled =
       this.configService.get<string>('ACTIVATE_STRADLE_EXECUTION', 'false') ===
@@ -492,6 +494,105 @@ export class AutoStradleExecutionService implements OnModuleInit {
     } catch (err) {
       this.logger.error('hasRecentRejection error', err?.stack || err);
       return false;
+    }
+  }
+
+  // helper to convert date string to epoch seconds (if needed for time comparisons)
+  private convertToEpoch(dateStr: string): string {
+    try {
+      const date = new Date(dateStr);
+      return Math.floor(date.getTime() / 1000).toString();
+    } catch (err) {
+      this.logger.error('convertToEpoch error', err?.stack || err);
+      return '';
+    }
+  }
+
+  private getDefaultStartEndEpoch() {
+    try {
+      const now = new Date();
+
+      const yyyy = now.getFullYear();
+      const mm = String(now.getMonth() + 1).padStart(2, '0');
+      const dd = String(now.getDate()).padStart(2, '0');
+
+      const start = new Date(`${yyyy}-${mm}-${dd}T09:00:00`);
+      const end = new Date(`${yyyy}-${mm}-${dd}T09:45:00`);
+
+      return {
+        starttime: Math.floor(start.getTime() / 1000).toString(),
+        endtime: Math.floor(end.getTime() / 1000).toString(),
+      };
+    } catch (err) {
+      this.logger.error('getDefaultStartEndEpoch error', err?.stack || err);
+      return { starttime: '', endtime: '' };
+    }
+  }
+
+  // main function to genrate highest high and low of the day from time series data for given token and exchange
+  async getHighLowFromTimeSeries(params: {
+    exchange: string;
+    token: string;
+    startDateTime?: string;
+    endDateTime?: string;
+  }) {
+    try {
+      let starttime: string;
+      let endtime: string;
+
+      // ⭐ if dates missing → default range
+      if (!params.startDateTime || !params.endDateTime) {
+        const def = this.getDefaultStartEndEpoch();
+        starttime = def.starttime;
+        endtime = def.endtime;
+      } else {
+        starttime = this.convertToEpoch(params.startDateTime);
+        endtime = this.convertToEpoch(params.endDateTime);
+      }
+
+      const data = await this.marketService.getTimePriceSeries({
+        exchange: params.exchange,
+        token: params.token,
+        starttime,
+        endtime,
+        interval: '5',
+      });
+
+      if (!Array.isArray(data) || !data.length) {
+        this.logger.warn('No time series data received');
+        return null;
+      }
+
+      let highestHigh = -Infinity;
+      let highestHighTime = '';
+
+      let lowestLow = Infinity;
+      let lowestLowTime = '';
+
+      for (const candle of data) {
+        const high = Number(candle.inth);
+        const low = Number(candle.intl);
+
+        if (!isNaN(high) && high > highestHigh) {
+          highestHigh = high;
+          highestHighTime = candle.time;
+        }
+
+        if (!isNaN(low) && low < lowestLow) {
+          lowestLow = low;
+          lowestLowTime = candle.time;
+        }
+      }
+
+      return {
+        highestHigh,
+        highestHighTime,
+        lowestLow,
+        lowestLowTime,
+      };
+    } catch (err) {
+      this.logger.error('getHighLowFromTimeSeries error', err?.stack || err);
+      return null;
     }
   }
 }
