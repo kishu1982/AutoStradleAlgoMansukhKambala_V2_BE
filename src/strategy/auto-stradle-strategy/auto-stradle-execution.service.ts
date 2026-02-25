@@ -498,33 +498,43 @@ export class AutoStradleExecutionService implements OnModuleInit {
   }
 
   // helper to convert date string to epoch seconds (if needed for time comparisons)
-  private convertToEpoch(dateStr: string): string {
+  private convertISTToEpoch(dateTimeStr: string): string {
     try {
-      const date = new Date(dateStr);
-      return Math.floor(date.getTime() / 1000).toString();
+      // Treat input as IST
+      const istDate = new Date(
+        new Date(dateTimeStr).toLocaleString('en-US', {
+          timeZone: 'Asia/Kolkata',
+        }),
+      );
+
+      return Math.floor(istDate.getTime() / 1000).toString();
     } catch (err) {
-      this.logger.error('convertToEpoch error', err?.stack || err);
+      this.logger.error('convertISTToEpoch error', err?.stack || err);
       return '';
     }
   }
 
-  private getDefaultStartEndEpoch() {
+  private getDefaultISTStartEndEpoch() {
     try {
-      const now = new Date();
+      const nowIST = new Date(
+        new Date().toLocaleString('en-US', {
+          timeZone: 'Asia/Kolkata',
+        }),
+      );
 
-      const yyyy = now.getFullYear();
-      const mm = String(now.getMonth() + 1).padStart(2, '0');
-      const dd = String(now.getDate()).padStart(2, '0');
+      const yyyy = nowIST.getFullYear();
+      const mm = String(nowIST.getMonth() + 1).padStart(2, '0');
+      const dd = String(nowIST.getDate()).padStart(2, '0');
 
-      const start = new Date(`${yyyy}-${mm}-${dd}T09:00:00`);
-      const end = new Date(`${yyyy}-${mm}-${dd}T09:45:00`);
+      const startIST = new Date(`${yyyy}-${mm}-${dd}T09:00:00`);
+      const endIST = new Date(`${yyyy}-${mm}-${dd}T09:45:00`);
 
       return {
-        starttime: Math.floor(start.getTime() / 1000).toString(),
-        endtime: Math.floor(end.getTime() / 1000).toString(),
+        starttime: Math.floor(startIST.getTime() / 1000).toString(),
+        endtime: Math.floor(endIST.getTime() / 1000).toString(),
       };
     } catch (err) {
-      this.logger.error('getDefaultStartEndEpoch error', err?.stack || err);
+      this.logger.error('getDefaultISTStartEndEpoch error', err?.stack || err);
       return { starttime: '', endtime: '' };
     }
   }
@@ -542,12 +552,12 @@ export class AutoStradleExecutionService implements OnModuleInit {
 
       // ⭐ if dates missing → default range
       if (!params.startDateTime || !params.endDateTime) {
-        const def = this.getDefaultStartEndEpoch();
+        const def = this.getDefaultISTStartEndEpoch();
         starttime = def.starttime;
         endtime = def.endtime;
       } else {
-        starttime = this.convertToEpoch(params.startDateTime);
-        endtime = this.convertToEpoch(params.endDateTime);
+        starttime = this.convertISTToEpoch(params.startDateTime);
+        endtime = this.convertISTToEpoch(params.endDateTime);
       }
 
       const data = await this.marketService.getTimePriceSeries({

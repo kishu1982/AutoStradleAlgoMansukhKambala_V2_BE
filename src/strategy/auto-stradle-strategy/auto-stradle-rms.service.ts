@@ -7,6 +7,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { OrdersService } from 'src/orders/orders.service';
 import { ConfigService } from '@nestjs/config';
+import { Interval } from '@nestjs/schedule';
+import { AutoStradleExecutionService } from './auto-stradle-execution.service';
 
 @Injectable()
 export class AutoStradleRMSService implements OnModuleInit {
@@ -50,6 +52,16 @@ export class AutoStradleRMSService implements OnModuleInit {
     this.buildIndex();
   }
 
+  // also to update bulding index on regular bases
+  @Interval(5000)
+  async refreshIndexPeriodically() {
+    try {
+      this.activeConfigs = await this.autoStradleService.findActive();
+      this.buildIndex();
+    } catch (e) {
+      this.logger.error('refreshIndexPeriodically error', e);
+    }
+  }
   // =====================================================
   // TICK RECEIVER
   // =====================================================
@@ -63,6 +75,7 @@ export class AutoStradleRMSService implements OnModuleInit {
       const key = `${feed.e}|${feed.tk}`;
       // this.logger.debug(`Received tick for ${key}`);
       // this.logger.debug(feed);
+      this.logger.debug(`Tick received for key=${key}`);
 
       // ⭐ Merge tick safely
       const updatedTick = this.mergeTickData(key, feed);
@@ -84,6 +97,8 @@ export class AutoStradleRMSService implements OnModuleInit {
     netPositions: any[],
   ): Promise<boolean> {
     try {
+      this.logger.debug(`Processing config ${config._id}`);
+
       let totalLiveValue = 0;
       let totalInvestedValue = 0;
       let totalPnL = 0;
@@ -94,9 +109,17 @@ export class AutoStradleRMSService implements OnModuleInit {
       for (const leg of config.legsData) {
         const key = `${leg.exch}|${leg.tokenNumber}`;
         const tick = this.priceMap.get(key);
+        // debug data logs
+        if (!tick) {
+          this.logger.warn(`Missing tick for ${key}`);
+        }
+
         if (!tick) continue;
 
         const netQty = this.getNetQty(netPositions, leg);
+        if (!netQty) {
+          this.logger.warn(`NetQty ZERO for ${key} `);
+        }
         if (!netQty) continue;
 
         hasOpenPosition = true;
@@ -149,7 +172,8 @@ export class AutoStradleRMSService implements OnModuleInit {
 
       // ✅ CHECK FOR RMS EXIT
       // await this.checkRatioExit(config);
-      void this.runExitChecks(config);
+      // void this.runExitChecks(config);
+      await this.runExitChecks(config);
 
       // ✅ RATIO CALCULATION
       const maxValue = Math.max(
@@ -222,6 +246,7 @@ export class AutoStradleRMSService implements OnModuleInit {
       const file = path.join(this.SAVE_PATH, `${config._id}.json`);
 
       fs.writeFileSync(file, JSON.stringify(config, null, 2));
+      this.logger.debug(`Writing JSON file ${config._id}`);
     } catch (err) {
       this.logger.error('persistConfig error', err?.stack || err);
     }
@@ -336,6 +361,9 @@ export class AutoStradleRMSService implements OnModuleInit {
     const relatedConfigs = this.tokenIndex.get(key);
 
     if (!relatedConfigs?.length) {
+      // this.logger.warn(
+      //   `No configs mapped for token ${key}  which can lead not making rms json file for closed position and not exiting on time, consider checking index mapping for this token`,
+      // );
       return;
     }
 
@@ -348,6 +376,9 @@ export class AutoStradleRMSService implements OnModuleInit {
       );
 
       if (hasOpenPosition) {
+        this.logger.debug(
+          `Persist decision: hasOpenPosition=${hasOpenPosition} for ${config._id}`,
+        );
         this.persistConfig(config);
       } else {
         this.removeConfigFile(config);
@@ -572,51 +603,268 @@ runExitChecks()
   // =====================================================
   // UNIVERSAL SQUARE OFF FUNCTION
   // =====================================================
+
+  /*
+Exit trigger
+   ↓
+Ratio batch close
+   ↓
+Wait for position update
+   ↓
+Next batch
+   ↓
+Fully closed
+*/
+
   private async squareOffConfig(config: any, reason: string) {
     try {
       if (!config?.legsData?.length) return;
 
-      // Prevent duplicate exit triggers
-      if (config.exitTriggered) return;
-
-      config.exitTriggered = true;
-
-      this.logger.warn(`🚨 RMS EXIT triggered (${reason}) for ${config._id}`);
-
-      const netPositions = await this.exchangeDataService.getNetPositions();
-
-      for (const leg of config.legsData) {
-        const netQty = this.getNetPositionQty(
-          netPositions,
-          leg.tokenNumber,
-          leg.exch,
-        );
-
-        if (!netQty) continue;
-
-        const exitSide = netQty > 0 ? 'S' : 'B';
-
-        const qty = Math.abs(netQty);
-
-        await this.ordersService.placeOrder({
-          buy_or_sell: exitSide,
-          product_type: config.productType === 'INTRADAY' ? 'I' : 'M',
-          exchange: leg.exch,
-          tradingsymbol: leg.tradingSymbol,
-          quantity: qty,
-          price_type: 'MKT',
-          price: 0,
-          trigger_price: 0,
-          discloseqty: 0,
-          retention: 'DAY',
-          amo: 'NO',
-          remarks: `AUTO STRADLE RMS EXIT (${reason})`,
-        });
-
-        this.logger.warn(`Exit order placed ${leg.tradingSymbol} qty=${qty}`);
+      if (config.exitStatus === 'EXITING') {
+        this.logger.warn(`⚠ Exit already in progress ${config._id}`);
+        return;
       }
+
+      if (config.exitStatus === 'EXITED') {
+        this.logger.warn(`⚠ Already exited ${config._id}`);
+        return;
+      }
+
+      config.exitStatus = 'EXITING';
+
+      this.logger.warn(
+        `🚨 RMS Ratio EXIT triggered (${reason}) for ${config._id}`,
+      );
+
+      await this.executeRatioClose(config, reason);
+
+      config.exitStatus = 'EXITED';
+
+      this.logger.warn(`✅ Exit completed ${config._id}`);
     } catch (error) {
       this.logger.error('squareOffConfig error', error?.stack || error);
     }
+  }
+
+  // old working
+  // private async squareOffConfig(config: any, reason: string) {
+  //   try {
+  //     if (!config?.legsData?.length) return;
+
+  //     // 🚫 Prevent duplicate execution
+  //     if (config.exitStatus === 'EXITING') {
+  //       this.logger.warn(`⚠ Exit already in progress for ${config._id}`);
+  //       return;
+  //     }
+
+  //     if (config.exitStatus === 'EXITED') {
+  //       this.logger.warn(`⚠ Config already exited ${config._id}`);
+  //       return;
+  //     }
+
+  //     config.exitStatus = 'EXITING';
+
+  //     this.logger.warn(`🚨 RMS EXIT triggered (${reason}) for ${config._id}`);
+
+  //     const netPositions = await this.exchangeDataService.getNetPositions();
+
+  //     // ===============================
+  //     // STEP 1 — Place Exit Orders
+  //     // ===============================
+
+  //     for (const leg of config.legsData) {
+  //       const netQty = this.getNetPositionQty(
+  //         netPositions,
+  //         leg.tokenNumber,
+  //         leg.exch,
+  //       );
+
+  //       if (!netQty) continue;
+
+  //       const exitSide = netQty > 0 ? 'S' : 'B';
+  //       const qty = Math.abs(netQty);
+
+  //       this.logger.warn(
+  //         `📤 Placing exit order ${leg.tradingSymbol} qty=${qty}`,
+  //       );
+
+  //       await this.ordersService.placeOrder({
+  //         buy_or_sell: exitSide,
+  //         product_type: config.productType === 'INTRADAY' ? 'I' : 'M',
+  //         exchange: leg.exch,
+  //         tradingsymbol: leg.tradingSymbol,
+  //         quantity: qty,
+  //         price_type: 'MKT',
+  //         price: 0,
+  //         trigger_price: 0,
+  //         discloseqty: 0,
+  //         retention: 'DAY',
+  //         amo: 'NO',
+  //         remarks: `AUTO STRADLE RMS EXIT (${reason})`,
+  //       });
+  //     }
+
+  //     // ===============================
+  //     // STEP 2 — WAIT FOR CONFIRMATION
+  //     // ===============================
+
+  //     const maxWaitMs = 10000; // 10 sec
+  //     const checkInterval = 500; // 500ms
+  //     const startTime = Date.now();
+
+  //     while (Date.now() - startTime < maxWaitMs) {
+  //       await new Promise((res) => setTimeout(res, checkInterval));
+
+  //       const latestPositions =
+  //         await this.exchangeDataService.getNetPositions();
+
+  //       const stillOpen = config.legsData.some((leg) => {
+  //         const qty = this.getNetPositionQty(
+  //           latestPositions,
+  //           leg.tokenNumber,
+  //           leg.exch,
+  //         );
+  //         return qty !== 0;
+  //       });
+
+  //       if (!stillOpen) {
+  //         config.exitStatus = 'EXITED';
+  //         this.logger.warn(
+  //           `✅ Exit confirmed. Positions fully closed for ${config._id}`,
+  //         );
+  //         return;
+  //       }
+
+  //       this.logger.debug(`⏳ Waiting for exit confirmation ${config._id}`);
+  //     }
+
+  //     // Timeout fallback
+  //     this.logger.error(
+  //       `⚠ Exit confirmation timeout for ${config._id}. Manual check required.`,
+  //     );
+  //   } catch (error) {
+  //     this.logger.error('squareOffConfig error', error?.stack || error);
+  //   }
+  // }
+
+  // ratio part for exit in batchs
+  private async executeRatioClose(config: any, reason: string) {
+    if (config.exitStatus !== 'EXITING') return;
+    const [legA, legB] = config.legsData;
+    if (!legA || !legB) return;
+
+    let loopCount = 0;
+    const MAX_LOOP = 10;
+
+    while (true) {
+      loopCount++;
+
+      if (loopCount > MAX_LOOP) {
+        this.logger.error(`Exit max loop reached ${config._id}`);
+        break;
+      }
+
+      const netPositions = await this.exchangeDataService.getNetPositions();
+
+      const netA = this.getNetPositionQty(
+        netPositions,
+        legA.tokenNumber,
+        legA.exch,
+      );
+
+      const netB = this.getNetPositionQty(
+        netPositions,
+        legB.tokenNumber,
+        legB.exch,
+      );
+
+      // ✅ Stop when fully closed
+      if (!netA && !netB) {
+        this.logger.warn(`✅ Ratio exit confirmed (${reason}) ${config._id}`);
+        break;
+      }
+      const lotA = Number(legA.lotSize || 1);
+      const lotB = Number(legB.lotSize || 1);
+
+      // remaining lots
+      // const remainingALots = Math.floor(Math.abs(netA) / lotA);
+      const remainingALots = Math.max(0, Math.floor(Math.abs(netA) / lotA));
+      // const remainingBLots = Math.floor(Math.abs(netB) / lotB);
+      const remainingBLots = Math.max(0, Math.floor(Math.abs(netB) / lotB));
+
+      // calculate ratio batch (LOTS)
+      const batch = this.calculateExitBatch(
+        legA,
+        legB,
+        remainingALots,
+        remainingBLots,
+      );
+
+      // 🔥 Convert lots → units
+      const qtyA = Math.min(batch[legA.tokenNumber] * lotA, Math.abs(netA));
+      const qtyB = Math.min(batch[legB.tokenNumber] * lotB, Math.abs(netB));
+
+      await Promise.all([
+        qtyA > 0
+          ? this.ordersService.placeOrder({
+              buy_or_sell: netA > 0 ? 'S' : 'B',
+              product_type: config.productType === 'INTRADAY' ? 'I' : 'M',
+              exchange: legA.exch,
+              tradingsymbol: legA.tradingSymbol,
+              quantity: qtyA,
+              price_type: 'MKT',
+              price: 0,
+              trigger_price: 0,
+              discloseqty: 0,
+              retention: 'DAY',
+              amo: 'NO',
+              remarks: `AUTO STRADLE EXIT A (${reason})`,
+            })
+          : Promise.resolve(),
+
+        qtyB > 0
+          ? this.ordersService.placeOrder({
+              buy_or_sell: netB > 0 ? 'S' : 'B',
+              product_type: config.productType === 'INTRADAY' ? 'I' : 'M',
+              exchange: legB.exch,
+              tradingsymbol: legB.tradingSymbol,
+              quantity: qtyB,
+              price_type: 'MKT',
+              price: 0,
+              trigger_price: 0,
+              discloseqty: 0,
+              retention: 'DAY',
+              amo: 'NO',
+              remarks: `AUTO STRADLE EXIT B (${reason})`,
+            })
+          : Promise.resolve(),
+      ]);
+
+      await new Promise((res) => setTimeout(res, 800)); // wait for position update
+    }
+  }
+
+  // batch calculator
+  private calculateExitBatch(legA, legB, remainingA, remainingB) {
+    const ratioA = legA.quantityLots || 1;
+    const ratioB = legB.quantityLots || 1;
+
+    // calculate max batch possible while preserving ratio
+    const maxBatch = Math.min(
+      Math.floor(remainingA / ratioA),
+      Math.floor(remainingB / ratioB),
+    );
+
+    if (maxBatch <= 0) {
+      return {
+        [legA.tokenNumber]: remainingA > 0 ? 1 : 0,
+        [legB.tokenNumber]: remainingB > 0 ? 1 : 0,
+      };
+    }
+
+    return {
+      [legA.tokenNumber]: maxBatch * ratioA,
+      [legB.tokenNumber]: maxBatch * ratioB,
+    };
   }
 }
