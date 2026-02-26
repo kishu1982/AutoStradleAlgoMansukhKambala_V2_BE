@@ -8,15 +8,15 @@ import * as path from 'path';
 import { OrdersService } from 'src/orders/orders.service';
 import { ConfigService } from '@nestjs/config';
 import { Interval } from '@nestjs/schedule';
-import { AutoStradleExecutionService } from './auto-stradle-execution.service';
-
 @Injectable()
 export class AutoStradleRMSService implements OnModuleInit {
   private readonly logger = new Logger(AutoStradleRMSService.name);
 
   private activeConfigs: any[] = [];
   private tokenIndex = new Map<string, any[]>();
+  private underlyingIndex = new Map<string, any[]>();
   private priceMap = new Map<string, MarketTick>();
+  private exitLocks = new Set<string>();
 
   private readonly SAVE_PATH = path.join(
     process.cwd(),
@@ -275,18 +275,31 @@ export class AutoStradleRMSService implements OnModuleInit {
 
   private buildIndex() {
     this.tokenIndex.clear();
+    this.underlyingIndex.clear(); // ⭐ ADD
 
     for (const config of this.activeConfigs) {
-      // ✅ index underlying token also
-      const mainKey = `${config.exchange}|${config.tokenNumber}`;
+      // ======================
+      // UNDERLYING INDEX
+      // ======================
 
-      if (!this.tokenIndex.has(mainKey)) {
-        this.tokenIndex.set(mainKey, []);
+      const underlyingKey = `${config.exchange}|${config.tokenNumber}`;
+
+      if (!this.underlyingIndex.has(underlyingKey)) {
+        this.underlyingIndex.set(underlyingKey, []);
       }
 
-      this.tokenIndex.get(mainKey)!.push(config);
+      this.underlyingIndex.get(underlyingKey)!.push(config);
 
-      // existing leg indexing
+      // ======================
+      // EXISTING TOKEN INDEX
+      // ======================
+
+      if (!this.tokenIndex.has(underlyingKey)) {
+        this.tokenIndex.set(underlyingKey, []);
+      }
+
+      this.tokenIndex.get(underlyingKey)!.push(config);
+
       for (const leg of config.legsData || []) {
         const key = `${leg.exch}|${leg.tokenNumber}`;
 
@@ -614,35 +627,44 @@ Wait for position update
 Next batch
    ↓
 Fully closed
+/////////////////////////////////////
+Manual exit arrives
+   ↓
+Lock acquired
+   ↓
+RMS auto exit tries
+   ↓
+LOCKED → ignored
 */
 
   private async squareOffConfig(config: any, reason: string) {
+    const lockKey = String(config._id);
+
+    if (this.exitLocks.has(lockKey)) {
+      this.logger.warn(`⚠ Exit already locked ${config._id}`);
+      return;
+    }
+
+    this.exitLocks.add(lockKey);
+
     try {
       if (!config?.legsData?.length) return;
 
-      if (config.exitStatus === 'EXITING') {
-        this.logger.warn(`⚠ Exit already in progress ${config._id}`);
-        return;
-      }
-
       if (config.exitStatus === 'EXITED') {
-        this.logger.warn(`⚠ Already exited ${config._id}`);
         return;
       }
 
       config.exitStatus = 'EXITING';
 
-      this.logger.warn(
-        `🚨 RMS Ratio EXIT triggered (${reason}) for ${config._id}`,
-      );
+      this.logger.warn(`🚨 RMS EXIT (${reason}) ${config._id}`);
 
       await this.executeRatioClose(config, reason);
 
       config.exitStatus = 'EXITED';
-
-      this.logger.warn(`✅ Exit completed ${config._id}`);
     } catch (error) {
       this.logger.error('squareOffConfig error', error?.stack || error);
+    } finally {
+      this.exitLocks.delete(lockKey); // ⭐ CRITICAL
     }
   }
 
@@ -777,6 +799,10 @@ Fully closed
         legB.tokenNumber,
         legB.exch,
       );
+      // Prevent over-closing if no position left
+      if (netA === 0 && netB === 0) {
+        break;
+      }
 
       // ✅ Stop when fully closed
       if (!netA && !netB) {
@@ -803,6 +829,11 @@ Fully closed
       // 🔥 Convert lots → units
       const qtyA = Math.min(batch[legA.tokenNumber] * lotA, Math.abs(netA));
       const qtyB = Math.min(batch[legB.tokenNumber] * lotB, Math.abs(netB));
+
+      if (Math.abs(netA) < lotA && Math.abs(netB) < lotB) {
+        this.logger.warn(`Remaining qty less than lot size. Breaking.`);
+        break;
+      }
 
       await Promise.all([
         qtyA > 0
@@ -840,7 +871,8 @@ Fully closed
           : Promise.resolve(),
       ]);
 
-      await new Promise((res) => setTimeout(res, 800)); // wait for position update
+      // await new Promise((res) => setTimeout(res, 800)); // wait for position update
+      await this.waitForPositionUpdate(config, legA, legB, netA, netB); // instead of delay. lets check in delay the net positions in every 500 ml seconds
     }
   }
 
@@ -866,5 +898,139 @@ Fully closed
       [legA.tokenNumber]: maxBatch * ratioA,
       [legB.tokenNumber]: maxBatch * ratioB,
     };
+  }
+
+  /*
+Controller API
+      ↓
+RMS.manualSquareOffByUnderlying()
+      ↓
+Find matching configs
+      ↓
+Verify open position
+      ↓
+squareOffConfig()
+      ↓
+executeRatioClose()
+*/
+
+  public async manualSquareOff(params: {
+    tokenNumber: string;
+    exchange: string;
+  }) {
+    try {
+      const exchange = String(params.exchange).trim().toUpperCase();
+      const tokenNumber = String(params.tokenNumber).trim();
+
+      const key = `${exchange}|${tokenNumber}`;
+
+      this.logger.warn(`🚨 Manual squareoff request received for ${key}`);
+
+      // ⭐ FAST lookup via underlyingIndex
+      const matchedConfigs = this.underlyingIndex.get(key);
+
+      if (!matchedConfigs?.length) {
+        this.logger.warn(`No configs mapped for ${key}`);
+        return {
+          success: false,
+          message: 'No matching stradle configs found',
+        };
+      }
+
+      // Get latest real positions
+      const netPositions = await this.exchangeDataService.getNetPositions();
+
+      let triggeredCount = 0;
+
+      for (const config of matchedConfigs) {
+        // 🚫 Skip if already exiting/exited
+        if (config.exitStatus === 'EXITING' || config.exitStatus === 'EXITED') {
+          this.logger.warn(
+            `Skipping ${config._id} — exit already in progress or completed`,
+          );
+          continue;
+        }
+
+        // ⭐ Check actual open positions
+        const hasOpenPosition = config.legsData.some((leg) => {
+          const qty = this.getNetPositionQty(
+            netPositions,
+            leg.tokenNumber,
+            leg.exch,
+          );
+
+          return qty !== 0;
+        });
+
+        if (!hasOpenPosition) {
+          this.logger.warn(`Skipping ${config._id} — no open positions`);
+          continue;
+        }
+
+        // ⭐ Trigger existing RMS exit logic
+        await this.squareOffConfig(config, 'MANUAL_EXIT');
+
+        triggeredCount++;
+      }
+
+      return {
+        success: true,
+        message: `Manual squareoff triggered for ${triggeredCount} config(s)`,
+      };
+    } catch (error) {
+      this.logger.error('manualSquareOff error', error?.stack || error);
+      throw error;
+    }
+  }
+
+  // helper fuction to wait for position update after exit order
+
+  /*
+Place exit
+Wait 800ms
+Check position
+Still same qty (because exchange delay)
+Place exit again
+*/
+
+  private async waitForPositionUpdate(
+    config: any,
+    legA: any,
+    legB: any,
+    prevNetA: number,
+    prevNetB: number,
+  ) {
+    const maxWaitMs = 4000; // 4 sec total wait
+    const interval = 500;
+    const start = Date.now();
+
+    while (Date.now() - start < maxWaitMs) {
+      await new Promise((res) => setTimeout(res, interval));
+
+      const netPositions = await this.exchangeDataService.getNetPositions();
+
+      const newNetA = this.getNetPositionQty(
+        netPositions,
+        legA.tokenNumber,
+        legA.exch,
+      );
+
+      const newNetB = this.getNetPositionQty(
+        netPositions,
+        legB.tokenNumber,
+        legB.exch,
+      );
+
+      // ✅ If reduced OR closed, break
+      if (
+        Math.abs(newNetA) < Math.abs(prevNetA) ||
+        Math.abs(newNetB) < Math.abs(prevNetB)
+      ) {
+        this.logger.debug(`Position update detected for ${config._id}`);
+        return;
+      }
+    }
+
+    this.logger.warn(`Position update timeout for ${config._id}`);
   }
 }

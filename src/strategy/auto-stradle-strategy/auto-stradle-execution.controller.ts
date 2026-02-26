@@ -1,9 +1,13 @@
 import { Controller, Post, Body, Get, Query } from '@nestjs/common';
 import { AutoStradleExecutionService } from './auto-stradle-execution.service';
+import { AutoStradleRMSService } from './auto-stradle-rms.service';
 
 @Controller('auto-stradle')
 export class AutoStradleExecutionController {
-  constructor(private readonly executionService: AutoStradleExecutionService) {}
+  constructor(
+    private readonly executionService: AutoStradleExecutionService,
+    private readonly rmsService: AutoStradleRMSService,
+  ) {}
 
   @Post('execute')
   async executeSignal(
@@ -31,5 +35,10 @@ export class AutoStradleExecutionController {
       startDateTime: start,
       endDateTime: end,
     });
+  }
+
+  @Post('manual-squareoff')
+  manualSquareOff(@Body() body: { tokenNumber: string; exchange: string }) {
+    return this.rmsService.manualSquareOff(body);
   }
 }
