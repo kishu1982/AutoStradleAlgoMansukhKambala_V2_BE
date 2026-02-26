@@ -806,6 +806,22 @@ Convert back to quantity
 Place order
    ↓
 Wait for position update
+
+
+////////////////////////////// new upcdate
+
+ratio exit
+↓
+fallback exit
+↓
+only one leg left
+↓
+FINAL CLEANUP MODE
+↓
+close remaining qty safely
+↓
+loop ends only when BOTH zero
+
   */
 
   // ratio part for exit in batchs
@@ -816,9 +832,9 @@ Wait for position update
     if (!legA || !legB) return;
 
     const MAX_ORDER_LOTS = 25;
+    const MAX_LOOP = 50;
 
     let loopCount = 0;
-    const MAX_LOOP = 50;
 
     while (true) {
       loopCount++;
@@ -828,7 +844,6 @@ Wait for position update
         break;
       }
 
-      // ⭐ ALWAYS GET LATEST POSITIONS
       const netPositions = await this.exchangeDataService.getNetPositions();
 
       const netA = this.getNetPositionQty(
@@ -846,17 +861,9 @@ Wait for position update
       // ======================
       // EXIT COMPLETE
       // ======================
+
       if (netA === 0 && netB === 0) {
         this.logger.warn(`Exit fully completed ${config._id}`);
-        break;
-      }
-
-      // ⭐ CRITICAL SAFETY
-      // Prevent single-leg exit (avoids reverse positions)
-      if (netA === 0 || netB === 0) {
-        this.logger.warn(
-          `One leg closed while other open — stopping exit loop to avoid imbalance.`,
-        );
         break;
       }
 
@@ -873,57 +880,55 @@ Wait for position update
       );
 
       if (!lotSizeA || !lotSizeB) {
-        this.logger.error(`Lot size missing from net position`);
+        this.logger.error(`Lot size missing`);
         break;
       }
 
       const remainingALots = Math.floor(Math.abs(netA) / lotSizeA);
       const remainingBLots = Math.floor(Math.abs(netB) / lotSizeB);
 
-      if (remainingALots <= 0 || remainingBLots <= 0) {
-        this.logger.warn(`Remaining less than lot size — stopping`);
-        break;
-      }
-
-      const ratioA = Number(legA.quantityLots || 1);
-      const ratioB = Number(legB.quantityLots || 1);
-
       let exitLotsA = 0;
       let exitLotsB = 0;
 
       // ======================
-      // TRY RATIO EXIT
+      // FINAL CLEANUP MODE
       // ======================
-      const maxRatioBatch = Math.min(
-        Math.floor(remainingALots / ratioA),
-        Math.floor(remainingBLots / ratioB),
-      );
 
-      if (maxRatioBatch > 0) {
-        const allowedBatch = Math.min(
-          maxRatioBatch,
-          Math.floor(MAX_ORDER_LOTS / Math.max(ratioA, ratioB)),
+      if (netA === 0 || netB === 0) {
+        this.logger.warn(`Final cleanup mode`);
+
+        exitLotsA = remainingALots;
+        exitLotsB = remainingBLots;
+      } else {
+        const ratioA = Number(legA.quantityLots || 1);
+        const ratioB = Number(legB.quantityLots || 1);
+
+        const maxRatioBatch = Math.min(
+          Math.floor(remainingALots / ratioA),
+          Math.floor(remainingBLots / ratioB),
         );
 
-        exitLotsA = allowedBatch * ratioA;
-        exitLotsB = allowedBatch * ratioB;
+        if (maxRatioBatch > 0) {
+          const allowedBatch = Math.min(
+            maxRatioBatch,
+            Math.floor(MAX_ORDER_LOTS / Math.max(ratioA, ratioB)),
+          );
 
-        this.logger.warn(`Ratio batch exit mode`);
-      } else {
-        // ======================
-        // SAFE FALLBACK EXIT
-        // Only when BOTH legs still open
-        // ======================
-        this.logger.warn(`Fallback exit mode`);
+          exitLotsA = allowedBatch * ratioA;
+          exitLotsB = allowedBatch * ratioB;
 
-        exitLotsA = Math.min(remainingALots, MAX_ORDER_LOTS);
-        exitLotsB = Math.min(remainingBLots, MAX_ORDER_LOTS);
+          this.logger.warn(`Ratio batch exit mode`);
+        } else {
+          this.logger.warn(`Fallback exit mode`);
+
+          exitLotsA = Math.min(remainingALots, MAX_ORDER_LOTS);
+          exitLotsB = Math.min(remainingBLots, MAX_ORDER_LOTS);
+        }
       }
 
       let qtyA = exitLotsA * lotSizeA;
       let qtyB = exitLotsB * lotSizeB;
 
-      // ⭐ FINAL SAFETY CHECK
       qtyA = Math.min(qtyA, Math.abs(netA));
       qtyB = Math.min(qtyB, Math.abs(netB));
 
@@ -981,7 +986,7 @@ Wait for position update
       );
 
       if (!updated) {
-        this.logger.error(`Position not updated — stopping exit loop`);
+        this.logger.error(`Position not updated — stopping`);
         break;
       }
     }
