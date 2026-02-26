@@ -562,9 +562,17 @@ runExitChecks()
   */
   private async runExitChecks(config: any) {
     try {
+      if (config.exitStatus === 'EXITING') return;
+
       await this.checkRatioExit(config);
 
+      if (config.exitStatus === 'EXITING') return;
+
       await this.checkUnderlyingMoveExit(config);
+
+      if (config.exitStatus === 'EXITING') return;
+
+      await this.checkPnLExit(config);
 
       // future:
       // await this.checkStopLoss(config);
@@ -769,14 +777,48 @@ LOCKED → ignored
   //   }
   // }
 
+  /*
+
+  Loop
+   ↓
+Calculate qty
+   ↓
+Place exit orders
+   ↓
+WAIT until BOTH legs update
+   ↓
+Recalculate
+   ↓
+Next batch
+
+/////////////////////////////////////
+
+Get net positions
+   ↓
+Convert to lots
+   ↓
+Calculate ratio batch size
+   ↓
+Limit to exchange max (25)
+   ↓
+Convert back to quantity
+   ↓
+Place order
+   ↓
+Wait for position update
+  */
+
   // ratio part for exit in batchs
   private async executeRatioClose(config: any, reason: string) {
     if (config.exitStatus !== 'EXITING') return;
+
     const [legA, legB] = config.legsData;
     if (!legA || !legB) return;
 
+    const MAX_ORDER_LOTS = 25;
+
     let loopCount = 0;
-    const MAX_LOOP = 10;
+    const MAX_LOOP = 50;
 
     while (true) {
       loopCount++;
@@ -786,6 +828,7 @@ LOCKED → ignored
         break;
       }
 
+      // ⭐ ALWAYS GET LATEST POSITIONS
       const netPositions = await this.exchangeDataService.getNetPositions();
 
       const netA = this.getNetPositionQty(
@@ -799,41 +842,99 @@ LOCKED → ignored
         legB.tokenNumber,
         legB.exch,
       );
-      // Prevent over-closing if no position left
+
+      // ======================
+      // EXIT COMPLETE
+      // ======================
       if (netA === 0 && netB === 0) {
+        this.logger.warn(`Exit fully completed ${config._id}`);
         break;
       }
 
-      // ✅ Stop when fully closed
-      if (!netA && !netB) {
-        this.logger.warn(`✅ Ratio exit confirmed (${reason}) ${config._id}`);
+      // ⭐ CRITICAL SAFETY
+      // Prevent single-leg exit (avoids reverse positions)
+      if (netA === 0 || netB === 0) {
+        this.logger.warn(
+          `One leg closed while other open — stopping exit loop to avoid imbalance.`,
+        );
         break;
       }
-      const lotA = Number(legA.lotSize || 1);
-      const lotB = Number(legB.lotSize || 1);
 
-      // remaining lots
-      // const remainingALots = Math.floor(Math.abs(netA) / lotA);
-      const remainingALots = Math.max(0, Math.floor(Math.abs(netA) / lotA));
-      // const remainingBLots = Math.floor(Math.abs(netB) / lotB);
-      const remainingBLots = Math.max(0, Math.floor(Math.abs(netB) / lotB));
-
-      // calculate ratio batch (LOTS)
-      const batch = this.calculateExitBatch(
-        legA,
-        legB,
-        remainingALots,
-        remainingBLots,
+      const lotSizeA = this.getLotSizeFromPosition(
+        netPositions,
+        legA.tokenNumber,
+        legA.exch,
       );
 
-      // 🔥 Convert lots → units
-      const qtyA = Math.min(batch[legA.tokenNumber] * lotA, Math.abs(netA));
-      const qtyB = Math.min(batch[legB.tokenNumber] * lotB, Math.abs(netB));
+      const lotSizeB = this.getLotSizeFromPosition(
+        netPositions,
+        legB.tokenNumber,
+        legB.exch,
+      );
 
-      if (Math.abs(netA) < lotA && Math.abs(netB) < lotB) {
-        this.logger.warn(`Remaining qty less than lot size. Breaking.`);
+      if (!lotSizeA || !lotSizeB) {
+        this.logger.error(`Lot size missing from net position`);
         break;
       }
+
+      const remainingALots = Math.floor(Math.abs(netA) / lotSizeA);
+      const remainingBLots = Math.floor(Math.abs(netB) / lotSizeB);
+
+      if (remainingALots <= 0 || remainingBLots <= 0) {
+        this.logger.warn(`Remaining less than lot size — stopping`);
+        break;
+      }
+
+      const ratioA = Number(legA.quantityLots || 1);
+      const ratioB = Number(legB.quantityLots || 1);
+
+      let exitLotsA = 0;
+      let exitLotsB = 0;
+
+      // ======================
+      // TRY RATIO EXIT
+      // ======================
+      const maxRatioBatch = Math.min(
+        Math.floor(remainingALots / ratioA),
+        Math.floor(remainingBLots / ratioB),
+      );
+
+      if (maxRatioBatch > 0) {
+        const allowedBatch = Math.min(
+          maxRatioBatch,
+          Math.floor(MAX_ORDER_LOTS / Math.max(ratioA, ratioB)),
+        );
+
+        exitLotsA = allowedBatch * ratioA;
+        exitLotsB = allowedBatch * ratioB;
+
+        this.logger.warn(`Ratio batch exit mode`);
+      } else {
+        // ======================
+        // SAFE FALLBACK EXIT
+        // Only when BOTH legs still open
+        // ======================
+        this.logger.warn(`Fallback exit mode`);
+
+        exitLotsA = Math.min(remainingALots, MAX_ORDER_LOTS);
+        exitLotsB = Math.min(remainingBLots, MAX_ORDER_LOTS);
+      }
+
+      let qtyA = exitLotsA * lotSizeA;
+      let qtyB = exitLotsB * lotSizeB;
+
+      // ⭐ FINAL SAFETY CHECK
+      qtyA = Math.min(qtyA, Math.abs(netA));
+      qtyB = Math.min(qtyB, Math.abs(netB));
+
+      if (qtyA <= 0 && qtyB <= 0) {
+        this.logger.warn(`Nothing to exit — stopping`);
+        break;
+      }
+
+      this.logger.warn(
+        `Exit batch | netA=${netA} qtyA=${qtyA} | netB=${netB} qtyB=${qtyB}`,
+      );
 
       await Promise.all([
         qtyA > 0
@@ -871,34 +972,52 @@ LOCKED → ignored
           : Promise.resolve(),
       ]);
 
-      // await new Promise((res) => setTimeout(res, 800)); // wait for position update
-      await this.waitForPositionUpdate(config, legA, legB, netA, netB); // instead of delay. lets check in delay the net positions in every 500 ml seconds
+      const updated = await this.waitForPositionUpdate(
+        config,
+        legA,
+        legB,
+        netA,
+        netB,
+      );
+
+      if (!updated) {
+        this.logger.error(`Position not updated — stopping exit loop`);
+        break;
+      }
     }
   }
 
   // batch calculator
+
   private calculateExitBatch(legA, legB, remainingA, remainingB) {
-    const ratioA = legA.quantityLots || 1;
-    const ratioB = legB.quantityLots || 1;
-
-    // calculate max batch possible while preserving ratio
-    const maxBatch = Math.min(
-      Math.floor(remainingA / ratioA),
-      Math.floor(remainingB / ratioB),
-    );
-
-    if (maxBatch <= 0) {
-      return {
-        [legA.tokenNumber]: remainingA > 0 ? 1 : 0,
-        [legB.tokenNumber]: remainingB > 0 ? 1 : 0,
-      };
-    }
-
     return {
-      [legA.tokenNumber]: maxBatch * ratioA,
-      [legB.tokenNumber]: maxBatch * ratioB,
+      [legA.tokenNumber]: remainingA > 0 ? 1 : 0,
+      [legB.tokenNumber]: remainingB > 0 ? 1 : 0,
     };
   }
+  // old working
+  // private calculateExitBatch(legA, legB, remainingA, remainingB) {
+  //   const ratioA = legA.quantityLots || 1;
+  //   const ratioB = legB.quantityLots || 1;
+
+  //   // calculate max batch possible while preserving ratio
+  //   const maxBatch = Math.min(
+  //     Math.floor(remainingA / ratioA),
+  //     Math.floor(remainingB / ratioB),
+  //   );
+
+  //   if (maxBatch <= 0) {
+  //     return {
+  //       [legA.tokenNumber]: remainingA > 0 ? 1 : 0,
+  //       [legB.tokenNumber]: remainingB > 0 ? 1 : 0,
+  //     };
+  //   }
+
+  //   return {
+  //     [legA.tokenNumber]: maxBatch * ratioA,
+  //     [legB.tokenNumber]: maxBatch * ratioB,
+  //   };
+  // }
 
   /*
 Controller API
@@ -999,8 +1118,8 @@ Place exit again
     legB: any,
     prevNetA: number,
     prevNetB: number,
-  ) {
-    const maxWaitMs = 4000; // 4 sec total wait
+  ): Promise<boolean> {
+    const maxWaitMs = 4000;
     const interval = 500;
     const start = Date.now();
 
@@ -1021,16 +1140,64 @@ Place exit again
         legB.exch,
       );
 
-      // ✅ If reduced OR closed, break
+      // ✅ position reduced = success
       if (
         Math.abs(newNetA) < Math.abs(prevNetA) ||
         Math.abs(newNetB) < Math.abs(prevNetB)
       ) {
         this.logger.debug(`Position update detected for ${config._id}`);
-        return;
+        return true;
       }
     }
 
     this.logger.warn(`Position update timeout for ${config._id}`);
+    return false;
+  }
+
+  // logic for pnl exit
+  private async checkPnLExit(config: any) {
+    try {
+      if (config.exitStatus === 'EXITING' || config.exitStatus === 'EXITED') {
+        return;
+      }
+
+      const profitPct = Number(config.profitBookingPercentage || 0);
+      const stoplossPct = Number(config.stoplossBookingPercentage || 0);
+
+      if (!profitPct && !stoplossPct) return;
+
+      const pnlPct = Number(config.totalPnLPercentage || 0);
+
+      // ✅ PROFIT BOOKING
+      if (profitPct > 0 && pnlPct >= profitPct) {
+        this.logger.warn(`💰 PROFIT TARGET HIT ${config._id} | PnL%=${pnlPct}`);
+
+        await this.squareOffConfig(config, 'PROFIT_BOOKING');
+        return;
+      }
+
+      // ❌ STOP LOSS
+      if (stoplossPct > 0 && pnlPct <= -stoplossPct) {
+        this.logger.warn(`🛑 STOPLOSS HIT ${config._id} | PnL%=${pnlPct}`);
+
+        await this.squareOffConfig(config, 'STOPLOSS_BOOKING');
+        return;
+      }
+    } catch (error) {
+      this.logger.error('checkPnLExit error', error?.stack || error);
+    }
+  }
+
+  // helper fucntion to get lots size from net positions
+  private getLotSizeFromPosition(
+    netPositions: any[],
+    token: string,
+    exchange: string,
+  ): number {
+    const pos = netPositions.find(
+      (p) => p.token === token && p.raw?.exch === exchange,
+    );
+
+    return Number(pos?.raw?.ls || 0);
   }
 }
