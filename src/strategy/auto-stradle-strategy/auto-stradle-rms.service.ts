@@ -945,9 +945,11 @@ loop ends only when BOTH zero
       // GET LIMIT PRICES FOR BOTH LEGS
       // ==============================
 
-      const priceA = qtyA > 0 ? this.getRmsLimitPrice(legA, netA) : undefined;
+      const priceA =
+        qtyA > 0 ? this.getRmsLimitPrice(legA, netA, netPositions) : undefined;
 
-      const priceB = qtyB > 0 ? this.getRmsLimitPrice(legB, netB) : undefined;
+      const priceB =
+        qtyB > 0 ? this.getRmsLimitPrice(legB, netB, netPositions) : undefined;
 
       // ==============================
       // VALIDATE BOTH PRICES
@@ -1280,7 +1282,11 @@ Place exit again
   // =====================================================
   // RMS LIMIT PRICE RESOLVER (DEPTH BASED)
   // =====================================================
-  private getRmsLimitPrice(leg: any, netQty: number): number | undefined {
+  private getRmsLimitPrice(
+    leg: any,
+    netQty: number,
+    netPositions: any[],
+  ): number | undefined {
     const key = `${leg.exch}|${leg.tokenNumber}`;
     const tick = this.priceMap.get(key);
 
@@ -1289,25 +1295,79 @@ Place exit again
       return undefined;
     }
 
-    let price: number | undefined;
+    const tickSize = this.getTickSizeFromPosition(
+      netPositions,
+      leg.tokenNumber,
+      leg.exch,
+    );
 
-    // If netQty > 0 → we are LONG → exit by SELL → use bp5
+    let rawPrice: number | undefined;
+
+    // ===============================
+    // LONG → exit SELL → aggressive bid
+    // ===============================
     if (netQty > 0) {
-      price = tick.bp1 ?? tick.bp1 ?? tick.lp;
-      this.logger.debug(
-        `EXIT SELL using bp5=${price} for ${leg.tradingSymbol}`,
-      );
-    }
-    // If netQty < 0 → we are SHORT → exit by BUY → use sp5
-    else if (netQty < 0) {
-      price = tick.sp1 ?? tick.sp1 ?? tick.lp;
-      this.logger.debug(`EXIT BUY using sp5=${price} for ${leg.tradingSymbol}`);
+      if (!tick.bp1) return undefined;
+
+      rawPrice = Number(tick.bp1) * 0.75;
+
+      this.logger.debug(`EXIT SELL rawPrice=${rawPrice} (bp1*0.75)`);
+
+      rawPrice = this.roundToTick(rawPrice, tickSize, 'DOWN');
     }
 
-    if (!price || price <= 0 || isNaN(price)) {
+    // ===============================
+    // SHORT → exit BUY → aggressive ask
+    // ===============================
+    else if (netQty < 0) {
+      if (!tick.sp1) return undefined;
+
+      rawPrice = Number(tick.sp1) / 0.75;
+
+      this.logger.debug(`EXIT BUY rawPrice=${rawPrice} (sp1/0.75)`);
+
+      rawPrice = this.roundToTick(rawPrice, tickSize, 'UP');
+    }
+
+    if (!rawPrice || rawPrice <= 0 || isNaN(rawPrice)) {
       return undefined;
     }
 
-    return Number(price);
+    return Number(rawPrice.toFixed(8));
+  }
+
+  // ============================================
+  // GET TICK SIZE FROM NET POSITION
+  // ============================================
+  private getTickSizeFromPosition(
+    netPositions: any[],
+    token: string,
+    exchange: string,
+  ): number {
+    const pos = netPositions.find(
+      (p) => p.token === token && p.raw?.exch === exchange,
+    );
+
+    const ti = Number(pos?.raw?.ti || 0);
+
+    return ti > 0 ? ti : 0.05; // fallback safe tick
+  }
+  // ============================================
+  // ROUND PRICE TO VALID TICK
+  // ============================================
+  private roundToTick(
+    price: number,
+    tickSize: number,
+    direction: 'UP' | 'DOWN',
+  ): number {
+    if (!tickSize || tickSize <= 0) return price;
+
+    const factor = price / tickSize;
+
+    if (direction === 'UP') {
+      return Math.ceil(factor) * tickSize;
+    }
+
+    return Math.floor(factor) * tickSize;
   }
 }
