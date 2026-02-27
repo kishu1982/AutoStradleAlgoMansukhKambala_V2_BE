@@ -180,7 +180,48 @@ export class AutoStradleExecutionService implements OnModuleInit {
         }
 
         // ==============================
-        // PLACE ORDERS
+        // GET LIMIT PRICES
+        // ==============================
+
+        const [priceA, priceB] = await Promise.all([
+          qtyA > 0
+            ? this.getLimitPrice(legA.exch, legA.tokenNumber, legA.side)
+            : Promise.resolve(undefined),
+
+          qtyB > 0
+            ? this.getLimitPrice(legB.exch, legB.tokenNumber, legB.side)
+            : Promise.resolve(undefined),
+        ]);
+
+        // ==============================
+        // VALIDATE BOTH LEG PRICES
+        // ==============================
+
+        const legAPriceMissing = qtyA > 0 && priceA === undefined;
+        const legBPriceMissing = qtyB > 0 && priceB === undefined;
+
+        if (legAPriceMissing || legBPriceMissing) {
+          if (legAPriceMissing) {
+            this.logger.error(
+              `Price not available for LEG A → ${legA.tradingSymbol} (${legA.tokenNumber})`,
+            );
+          }
+
+          if (legBPriceMissing) {
+            this.logger.error(
+              `Price not available for LEG B → ${legB.tradingSymbol} (${legB.tokenNumber})`,
+            );
+          }
+
+          this.logger.error(
+            'Both leg prices are required. Skipping order placement.',
+          );
+
+          break; // Exit loop safely
+        }
+
+        // ==============================
+        // PLACE LIMIT ORDERS
         // ==============================
 
         await Promise.all([
@@ -191,8 +232,8 @@ export class AutoStradleExecutionService implements OnModuleInit {
                 exchange: legA.exch,
                 tradingsymbol: legA.tradingSymbol,
                 quantity: qtyA,
-                price_type: 'MKT',
-                price: 0,
+                price_type: 'LMT',
+                price: priceA,
                 trigger_price: 0,
                 discloseqty: 0,
                 retention: 'DAY',
@@ -208,8 +249,8 @@ export class AutoStradleExecutionService implements OnModuleInit {
                 exchange: legB.exch,
                 tradingsymbol: legB.tradingSymbol,
                 quantity: qtyB,
-                price_type: 'MKT',
-                price: 0,
+                price_type: 'LMT',
+                price: priceB,
                 trigger_price: 0,
                 discloseqty: 0,
                 retention: 'DAY',
@@ -218,6 +259,46 @@ export class AutoStradleExecutionService implements OnModuleInit {
               })
             : Promise.resolve(),
         ]);
+
+        // // ==============================
+        // // PLACE ORDERS
+        // // ==============================
+
+        // await Promise.all([
+        //   qtyA > 0
+        //     ? this.ordersService.placeOrder({
+        //         buy_or_sell: legA.side === 'BUY' ? 'B' : 'S',
+        //         product_type: this.resolveProductType(config.productType),
+        //         exchange: legA.exch,
+        //         tradingsymbol: legA.tradingSymbol,
+        //         quantity: qtyA,
+        //         price_type: 'MKT',
+        //         price: 0,
+        //         trigger_price: 0,
+        //         discloseqty: 0,
+        //         retention: 'DAY',
+        //         amo: 'NO',
+        //         remarks: `AUTO STRADLE A`,
+        //       })
+        //     : Promise.resolve(),
+
+        //   qtyB > 0
+        //     ? this.ordersService.placeOrder({
+        //         buy_or_sell: legB.side === 'BUY' ? 'B' : 'S',
+        //         product_type: this.resolveProductType(config.productType),
+        //         exchange: legB.exch,
+        //         tradingsymbol: legB.tradingSymbol,
+        //         quantity: qtyB,
+        //         price_type: 'MKT',
+        //         price: 0,
+        //         trigger_price: 0,
+        //         discloseqty: 0,
+        //         retention: 'DAY',
+        //         amo: 'NO',
+        //         remarks: `AUTO STRADLE B`,
+        //       })
+        //     : Promise.resolve(),
+        // ]);
 
         // ==============================
         // WAIT FOR UPDATE
@@ -603,6 +684,48 @@ export class AutoStradleExecutionService implements OnModuleInit {
     } catch (err) {
       this.logger.error('getHighLowFromTimeSeries error', err?.stack || err);
       return null;
+    }
+  }
+
+  // =====================================================
+  // GET LIMIT PRICE FROM QUOTES
+  // =====================================================
+  private async getLimitPrice(
+    exch: string,
+    token: string,
+    side: 'BUY' | 'SELL',
+  ): Promise<number | undefined> {
+    try {
+      const quote = await this.marketService.getQuotes({
+        exch,
+        token,
+      });
+
+      if (!quote || quote.stat !== 'Ok') {
+        this.logger.error('Quote fetch failed', quote);
+        return undefined;
+      }
+
+      let price: number | undefined;
+
+      if (side === 'BUY') {
+        // price = Number(quote.uc);
+        price = Number(quote.sp5);
+        this.logger.debug(
+          `BUY side - using sell price (sp5): ${price} for ${quote.tsym}`,
+        );
+      } else {
+        // price = Number(quote.lc);
+        price = Number(quote.bp5);
+        this.logger.debug(
+          `SELL side - using buy price (bp5): ${price} for ${quote.tsym}`,
+        );
+      }
+
+      return isNaN(price) ? undefined : price;
+    } catch (err) {
+      this.logger.error('getLimitPrice error', err?.stack || err);
+      return undefined;
     }
   }
 }

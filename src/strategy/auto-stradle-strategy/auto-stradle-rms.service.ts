@@ -941,6 +941,41 @@ loop ends only when BOTH zero
         `Exit batch | netA=${netA} qtyA=${qtyA} | netB=${netB} qtyB=${qtyB}`,
       );
 
+      // ==============================
+      // GET LIMIT PRICES FOR BOTH LEGS
+      // ==============================
+
+      const priceA = qtyA > 0 ? this.getRmsLimitPrice(legA, netA) : undefined;
+
+      const priceB = qtyB > 0 ? this.getRmsLimitPrice(legB, netB) : undefined;
+
+      // ==============================
+      // VALIDATE BOTH PRICES
+      // ==============================
+
+      const legAPriceMissing = qtyA > 0 && priceA === undefined;
+      const legBPriceMissing = qtyB > 0 && priceB === undefined;
+
+      if (legAPriceMissing || legBPriceMissing) {
+        if (legAPriceMissing) {
+          this.logger.error(`EXIT price missing LEG A ${legA.tradingSymbol}`);
+        }
+
+        if (legBPriceMissing) {
+          this.logger.error(`EXIT price missing LEG B ${legB.tradingSymbol}`);
+        }
+
+        this.logger.error(
+          `Both exit prices required. Skipping batch for ${config._id}`,
+        );
+
+        break; // DO NOT PLACE PARTIAL EXIT
+      }
+
+      // ==============================
+      // PLACE LIMIT EXIT ORDERS
+      // ==============================
+
       await Promise.all([
         qtyA > 0
           ? this.ordersService.placeOrder({
@@ -949,8 +984,8 @@ loop ends only when BOTH zero
               exchange: legA.exch,
               tradingsymbol: legA.tradingSymbol,
               quantity: qtyA,
-              price_type: 'MKT',
-              price: 0,
+              price_type: 'LMT',
+              price: priceA,
               trigger_price: 0,
               discloseqty: 0,
               retention: 'DAY',
@@ -966,8 +1001,8 @@ loop ends only when BOTH zero
               exchange: legB.exch,
               tradingsymbol: legB.tradingSymbol,
               quantity: qtyB,
-              price_type: 'MKT',
-              price: 0,
+              price_type: 'LMT',
+              price: priceB,
               trigger_price: 0,
               discloseqty: 0,
               retention: 'DAY',
@@ -976,6 +1011,42 @@ loop ends only when BOTH zero
             })
           : Promise.resolve(),
       ]);
+
+      // await Promise.all([
+      //   qtyA > 0
+      //     ? this.ordersService.placeOrder({
+      //         buy_or_sell: netA > 0 ? 'S' : 'B',
+      //         product_type: config.productType === 'INTRADAY' ? 'I' : 'M',
+      //         exchange: legA.exch,
+      //         tradingsymbol: legA.tradingSymbol,
+      //         quantity: qtyA,
+      //         price_type: 'MKT',
+      //         price: 0,
+      //         trigger_price: 0,
+      //         discloseqty: 0,
+      //         retention: 'DAY',
+      //         amo: 'NO',
+      //         remarks: `AUTO STRADLE EXIT A (${reason})`,
+      //       })
+      //     : Promise.resolve(),
+
+      //   qtyB > 0
+      //     ? this.ordersService.placeOrder({
+      //         buy_or_sell: netB > 0 ? 'S' : 'B',
+      //         product_type: config.productType === 'INTRADAY' ? 'I' : 'M',
+      //         exchange: legB.exch,
+      //         tradingsymbol: legB.tradingSymbol,
+      //         quantity: qtyB,
+      //         price_type: 'MKT',
+      //         price: 0,
+      //         trigger_price: 0,
+      //         discloseqty: 0,
+      //         retention: 'DAY',
+      //         amo: 'NO',
+      //         remarks: `AUTO STRADLE EXIT B (${reason})`,
+      //       })
+      //     : Promise.resolve(),
+      // ]);
 
       const updated = await this.waitForPositionUpdate(
         config,
@@ -1204,5 +1275,39 @@ Place exit again
     );
 
     return Number(pos?.raw?.ls || 0);
+  }
+
+  // =====================================================
+  // RMS LIMIT PRICE RESOLVER (DEPTH BASED)
+  // =====================================================
+  private getRmsLimitPrice(leg: any, netQty: number): number | undefined {
+    const key = `${leg.exch}|${leg.tokenNumber}`;
+    const tick = this.priceMap.get(key);
+
+    if (!tick) {
+      this.logger.error(`No tick data for ${key}`);
+      return undefined;
+    }
+
+    let price: number | undefined;
+
+    // If netQty > 0 → we are LONG → exit by SELL → use bp5
+    if (netQty > 0) {
+      price = tick.bp1 ?? tick.bp1 ?? tick.lp;
+      this.logger.debug(
+        `EXIT SELL using bp5=${price} for ${leg.tradingSymbol}`,
+      );
+    }
+    // If netQty < 0 → we are SHORT → exit by BUY → use sp5
+    else if (netQty < 0) {
+      price = tick.sp1 ?? tick.sp1 ?? tick.lp;
+      this.logger.debug(`EXIT BUY using sp5=${price} for ${leg.tradingSymbol}`);
+    }
+
+    if (!price || price <= 0 || isNaN(price)) {
+      return undefined;
+    }
+
+    return Number(price);
   }
 }
