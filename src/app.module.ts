@@ -12,6 +12,7 @@ import { DatabaseModule } from './database/database.module';
 import { StrategyModule } from './strategy/strategy.module';
 import { ScheduleModule } from '@nestjs/schedule';
 import { RequestLoggerMiddleware } from './common/middleware/logger/request-logger.middleware';
+import { TelegramModule } from './telegram/telegram.module';
 
 @Module({
   imports: [
@@ -24,7 +25,8 @@ import { RequestLoggerMiddleware } from './common/middleware/logger/request-logg
     WebsocketModule,
     DatabaseModule,
     StrategyModule,
-    ScheduleModule.forRoot(), // ✅ REQUIRED
+    ScheduleModule.forRoot(),
+    TelegramModule, // ✅ REQUIRED
   ],
   controllers: [AppController],
   providers: [AppService],

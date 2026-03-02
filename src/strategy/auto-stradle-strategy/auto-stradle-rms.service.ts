@@ -8,6 +8,7 @@ import * as path from 'path';
 import { OrdersService } from 'src/orders/orders.service';
 import { ConfigService } from '@nestjs/config';
 import { Interval } from '@nestjs/schedule';
+import { TelegramService } from 'src/telegram/telegram.service';
 @Injectable()
 export class AutoStradleRMSService implements OnModuleInit {
   private readonly logger = new Logger(AutoStradleRMSService.name);
@@ -30,6 +31,7 @@ export class AutoStradleRMSService implements OnModuleInit {
   constructor(
     private readonly autoStradleService: AutoStradleStrategyService,
     private readonly exchangeDataService: ExchangeDataService,
+    private readonly telegramService: TelegramService,
 
     private readonly ordersService: OrdersService,
     private readonly configService: ConfigService,
@@ -73,6 +75,9 @@ export class AutoStradleRMSService implements OnModuleInit {
       }
 
       const key = `${feed.e}|${feed.tk}`;
+      // testing by sending price feed to telegram
+   
+
       // this.logger.debug(`Received tick for ${key}`);
       // this.logger.debug(feed);
       this.logger.debug(`Tick received for key=${key}`);
@@ -122,6 +127,7 @@ export class AutoStradleRMSService implements OnModuleInit {
         }
         if (!netQty) continue;
 
+       
         hasOpenPosition = true;
 
         // 🔹 Direction-based exit price

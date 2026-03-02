@@ -11,6 +11,7 @@ import { AutoStradleExecutionService } from './auto-stradle-execution.service';
 import { ExchangeDataModule } from '../exchange-data/exchange-data.module';
 import { AutoStradleExecutionController } from './auto-stradle-execution.controller';
 import { AutoStradleRMSService } from './auto-stradle-rms.service';
+import { TelegramModule } from 'src/telegram/telegram.module';
 
 @Module({
   imports: [
@@ -19,6 +20,7 @@ import { AutoStradleRMSService } from './auto-stradle-rms.service';
     OrdersModule,
     MarketModule,
     ExchangeDataModule, // ⭐ ADD THIS
+    TelegramModule, // ⭐ ADD THIS
   ],
   controllers: [AutoStradleStrategyController, AutoStradleExecutionController],
   providers: [

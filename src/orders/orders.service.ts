@@ -10,6 +10,7 @@ import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import { AxiosError } from 'axios';
 import { PlaceOrderDto } from './dto/place-order.dto';
+import { TelegramService } from 'src/telegram/telegram.service';
 
 const NorenRestApi = require('norenrestapi/lib/restapi');
 
@@ -21,6 +22,7 @@ export class OrdersService {
   constructor(
     private readonly tokenService: TokenService,
     private readonly configService: ConfigService,
+    private readonly telegramService: TelegramService, // ⭐ ADD THIS
   ) {
     this.api = new NorenRestApi({});
   }
@@ -258,16 +260,41 @@ export class OrdersService {
         },
       );
 
+      // if (response.data?.stat === 'Not_Ok') {
+      //   throw new BadRequestException({
+      //     message: 'Order rejected by broker',
+      //     brokerError: response.data.emsg,
+      //   });
+      // }
+
+      // return response.data;
       if (response.data?.stat === 'Not_Ok') {
+        await this.sendTradeTelegram('REJECTED', order, response.data.emsg);
+
         throw new BadRequestException({
           message: 'Order rejected by broker',
           brokerError: response.data.emsg,
         });
       }
 
+      /* ✅ SUCCESS TELEGRAM */
+      await this.sendTradeTelegram(
+        'SUCCESS',
+        order,
+        `Order No: ${response.data?.norenordno ?? 'N/A'}`,
+      );
+
       return response.data;
     } catch (error) {
       if (error instanceof AxiosError) {
+        await this.sendTradeTelegram(
+          'ERROR',
+          order,
+          error.response?.data?.emsg ||
+            error.response?.data?.message ||
+            error.message,
+        );
+
         throw new BadRequestException({
           message: 'Failed to place order',
           brokerError:
@@ -278,6 +305,7 @@ export class OrdersService {
         });
       }
 
+      await this.sendTradeTelegram('ERROR', order, error.message);
       throw new InternalServerErrorException(
         'Unexpected error while placing order',
       );
@@ -1288,6 +1316,40 @@ export class OrdersService {
         message: 'Failed to fetch trade book',
         error: error.message,
       });
+    }
+  }
+
+  // helper to send telgram message once any kind of trade is placed
+
+  private async sendTradeTelegram(
+    type: 'SUCCESS' | 'REJECTED' | 'ERROR',
+    order: PlaceOrderDto,
+    extra?: any,
+  ) {
+    try {
+      const message = `
+📢 <b>ORDER ${type}</b>
+
+Symbol: ${order.tradingsymbol}
+Exchange: ${order.exchange}
+Side: ${order.buy_or_sell === 'B' ? 'BUY' : 'SELL'}
+Qty: ${order.quantity}
+Order Type: ${order.price_type}
+Product: ${order.product_type}
+Price: ${order.price ?? 'MKT'}
+Remark: ${order.remarks ?? 'None'}
+
+${extra ? `Details: ${extra}` : ''}
+
+Time: ${new Date().toLocaleString('en-IN', {
+        timeZone: 'Asia/Kolkata',
+      })}
+`;
+
+      // ⚡ Non-blocking (VERY IMPORTANT)
+      this.telegramService.sendMessage(message);
+    } catch (err) {
+      this.logger.error('Telegram send failed (ignored)', err.message);
     }
   }
 }
