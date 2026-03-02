@@ -394,17 +394,48 @@ export class OrdersService {
         timeout: 10000,
       });
 
+      // if (response.data?.stat === 'Not_Ok') {
+      //   throw new BadRequestException({
+      //     message: 'Order modification rejected by exchange',
+      //     brokerError: response.data.emsg,
+      //     raw: response.data,
+      //   });
+      // }
+
+      // return response.data;
       if (response.data?.stat === 'Not_Ok') {
+        await this.sendModifyTelegram(
+          'REJECTED',
+          data,
+          response.data.emsg,
+        );
+      
         throw new BadRequestException({
           message: 'Order modification rejected by exchange',
           brokerError: response.data.emsg,
           raw: response.data,
         });
       }
-
+      
+      /* ✅ SUCCESS TELEGRAM */
+      await this.sendModifyTelegram(
+        'SUCCESS',
+        data,
+        `Order No: ${data.orderno}`,
+      );
+      
       return response.data;
     } catch (error) {
       if (error instanceof AxiosError) {
+        await this.sendModifyTelegram(
+          'ERROR',
+          data,
+          error.response?.data?.emsg ||
+            error.response?.data ||
+            error.message,
+        );
+
+        
         throw new BadRequestException({
           message: 'Modify order failed',
           brokerError:
@@ -412,6 +443,7 @@ export class OrdersService {
         });
       }
 
+      await this.sendModifyTelegram('ERROR', data, error.message);
       throw new InternalServerErrorException(
         'Unexpected error while modifying order',
       );
@@ -1350,6 +1382,37 @@ Time: ${new Date().toLocaleString('en-IN', {
       this.telegramService.sendMessage(message);
     } catch (err) {
       this.logger.error('Telegram send failed (ignored)', err.message);
+    }
+  }
+
+  // // helper in case order is modified.
+  private async sendModifyTelegram(
+    type: 'SUCCESS' | 'REJECTED' | 'ERROR',
+    data: any,
+    extra?: any,
+  ) {
+    try {
+      const message = `
+🔁 <b>ORDER MODIFY ${type}</b>
+
+Order No: ${data.orderno}
+Symbol: ${data.tradingsymbol}
+Exchange: ${data.exchange}
+New Type: ${data.newprice_type}
+New Price: ${data.newprice ?? 'MKT'}
+Trigger: ${data.newtrigger_price ?? 'N/A'}
+
+${extra ? `Details: ${extra}` : ''}
+
+Time: ${new Date().toLocaleString('en-IN', {
+        timeZone: 'Asia/Kolkata',
+      })}
+`;
+
+      // ⚡ Non-blocking
+      this.telegramService.sendMessage(message);
+    } catch (err) {
+      this.logger.error('Modify Telegram failed (ignored)', err.message);
     }
   }
 }
