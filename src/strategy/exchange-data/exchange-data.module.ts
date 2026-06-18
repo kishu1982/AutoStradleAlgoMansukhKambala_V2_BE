@@ -6,6 +6,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { ExchangeOrder } from './exchange-entities/exchange-order.entity';
 import { ExchangeTrade } from './exchange-entities/exchange-trade.entity';
 import { ExchangeNetPosition } from './exchange-entities/exchange-net-position.entity';
+import { ExchangeDataController } from './exchange-data.controller';
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { ExchangeNetPosition } from './exchange-entities/exchange-net-position.e
     TypeOrmModule.forFeature([ExchangeNetPosition]),
   ], // required
   providers: [ExchangeDataService],
+  controllers: [ExchangeDataController],
   exports: [ExchangeDataService],
 })
 export class ExchangeDataModule {}

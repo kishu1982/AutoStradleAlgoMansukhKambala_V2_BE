@@ -10,6 +10,7 @@ import { InstrumentInfo } from './interfaces/local-instrumentInfo-interface';
 import { ExchangeOrder } from '../exchange-data/exchange-entities/exchange-order.entity';
 import { AutoStradleRMSService } from './auto-stradle-rms.service';
 import { MarketService } from './../../market/market.service';
+import { fileURLToPath } from 'url';
 
 @Injectable()
 export class AutoStradleExecutionService implements OnModuleInit {
@@ -726,6 +727,84 @@ export class AutoStradleExecutionService implements OnModuleInit {
     } catch (err) {
       this.logger.error('getLimitPrice error', err?.stack || err);
       return undefined;
+    }
+  }
+
+  //=====================================================
+  // GET ACTIVE AUTO STRADLE TRADE DATA
+  //=====================================================
+  // =====================================================
+  // GET ACTIVE AUTO STRADLE TRADE DATA
+  // =====================================================
+
+  async getActiveTradeData() {
+    try {
+      this.logger.debug('Fetching active trade data...');
+      const folderPath = path.join(process.cwd(), 'data', 'AutoStradleTrade');
+
+      // Folder not exists
+      if (!fs.existsSync(folderPath)) {
+        return {
+          success: false,
+          message: 'No trade running',
+          data: null,
+        };
+      }
+
+      const files = fs
+        .readdirSync(folderPath)
+        .filter((file) => file.endsWith('.json'));
+
+      // No json files found
+      if (!files.length) {
+        return {
+          success: false,
+          message: 'No trade running',
+          data: null,
+        };
+      }
+
+      const tradeData: {
+        fileName: string;
+        data: any;
+      }[] = [];
+
+      for (const file of files) {
+        try {
+          const filePath = path.join(folderPath, file);
+
+          const content = fs.readFileSync(filePath, 'utf8');
+
+          tradeData.push({
+            fileName: file,
+            data: JSON.parse(content),
+          });
+        } catch (err) {
+          this.logger.error(`Failed reading ${file}`, err?.stack || err);
+        }
+      }
+
+      if (!tradeData.length) {
+        return {
+          success: false,
+          message: 'No trade running',
+          data: null,
+        };
+      }
+
+      return {
+        success: true,
+        message: 'Active trade data found',
+        data: tradeData,
+      };
+    } catch (err) {
+      this.logger.error('getActiveTradeData error', err?.stack || err);
+
+      return {
+        success: false,
+        message: 'Failed to fetch trade data',
+        data: null,
+      };
     }
   }
 }

@@ -11,10 +11,12 @@ import { ExchangeTrade } from './exchange-entities/exchange-trade.entity';
 import { ExchangeNetPosition } from './exchange-entities/exchange-net-position.entity';
 
 import { Cron } from '@nestjs/schedule';
+import { ConfigService } from '@nestjs/config';
 
 @Injectable()
 export class ExchangeDataService implements OnModuleInit {
   private readonly logger = new Logger(ExchangeDataService.name);
+  private clientUid = ''; // for future use if needed in filter or anywhere else, can be set from env or config
 
   // ⭐ queue lock
   private syncPromise: Promise<void> = Promise.resolve();
@@ -36,7 +38,10 @@ export class ExchangeDataService implements OnModuleInit {
 
     private readonly ordersService: OrdersService,
     private readonly marketService: MarketService,
-  ) {}
+    private readonly configService: ConfigService,
+  ) {
+    this.clientUid = this.configService.get<string>('NOREN_CLIENT_ID') || '';
+  }
 
   // --------------------------------
   // MODULE INIT
@@ -211,6 +216,15 @@ export class ExchangeDataService implements OnModuleInit {
     } catch (err) {
       this.logger.error('syncCollection failed', err?.stack || err);
     }
+  }
+
+  // --------------------------------
+  // FOR GIVING CLINET ID ON WHICH ALGO IS RUNNING
+  // --------------------------------
+  getClientUid() {
+    const uid = this.clientUid;
+    console.log('Client UID requested:', uid); // 🔥 DEBUG
+    return { AlgoId: this.clientUid };
   }
 
   // --------------------------------

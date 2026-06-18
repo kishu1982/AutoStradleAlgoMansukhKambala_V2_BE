@@ -41,4 +41,14 @@ export class AutoStradleExecutionController {
   manualSquareOff(@Body() body: { tokenNumber: string; exchange: string }) {
     return this.rmsService.manualSquareOff(body);
   }
+
+  // --------------------------------
+  // get active trades (for auto stradle strategy)
+  // --------------------------------
+
+  @Get('active-trades')
+  async getActiveTrades() {
+    // console.log('Received request for active trades'); // 🔥 DEBUG
+    return await this.executionService.getActiveTradeData();
+  }
 }
