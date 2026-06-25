@@ -9,17 +9,56 @@ export class AutoStradleExecutionController {
     private readonly rmsService: AutoStradleRMSService,
   ) {}
 
+  // // to execute signal for auto stradle strategy, this will be used in rms service
+  // @Post('execute')
+  // async executeSignal(
+  //   @Body()
+  //   body: {
+  //     strategyName: string;
+  //     tokenNumber: string;
+  //     exchange: string;
+  //     side: 'BUY' | 'SELL';
+  //   },
+  // ) {
+  //   return this.executionService.executeSignal(body);
+  // }
+
+  // // to execute manual square off for a particular token and exchange, this will be used in rms service
+  // @Post('manual-squareoff')
+  // manualSquareOff(@Body() body: { tokenNumber: string; exchange: string }) {
+  //   return this.rmsService.manualSquareOff(body);
+  // }
+
+  // merging both into one endpoint, if side is BUY or SELL then execute signal, else manual square off
   @Post('execute')
   async executeSignal(
     @Body()
     body: {
-      strategyName: string;
+      strategyName?: string;
       tokenNumber: string;
       exchange: string;
-      side: 'BUY' | 'SELL';
+      side: string;
     },
   ) {
-    return this.executionService.executeSignal(body);
+    const side = body.side?.toUpperCase();
+
+    if (side === 'BUY' || side === 'SELL') {
+      if (!body.strategyName) {
+        throw new Error('strategyName is required for BUY/SELL');
+      }
+
+      return this.executionService.executeSignal({
+        strategyName: body.strategyName, // now TypeScript knows it's a string
+        tokenNumber: body.tokenNumber,
+        exchange: body.exchange,
+        side: side as 'BUY' | 'SELL',
+      });
+    }
+
+    return this.rmsService.manualSquareOff({
+      tokenNumber: body.tokenNumber,
+      exchange: body.exchange,
+    });
   }
 
   @Get('high-low')
@@ -35,11 +74,6 @@ export class AutoStradleExecutionController {
       startDateTime: start,
       endDateTime: end,
     });
-  }
-
-  @Post('manual-squareoff')
-  manualSquareOff(@Body() body: { tokenNumber: string; exchange: string }) {
-    return this.rmsService.manualSquareOff(body);
   }
 
   // --------------------------------
