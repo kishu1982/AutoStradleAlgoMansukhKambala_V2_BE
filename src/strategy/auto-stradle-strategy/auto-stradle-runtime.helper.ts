@@ -164,7 +164,7 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
           (i) => i.token.toString() === config.tokenNumber,
         );
 
-        const roundStep = isIndexToken ? 50 : 100; // round step for index tokens is 50, for others is 100
+        const roundStep = isIndexToken ? 100 : 100; // round step for index tokens is 50, for others is 100
         //const roundStep = isIndexToken ? 100 : 100;
         strike = this.roundStrike(strike, roundStep);
 
