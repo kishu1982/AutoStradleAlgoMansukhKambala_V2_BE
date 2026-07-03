@@ -12,6 +12,7 @@ import { ExchangeDataModule } from '../exchange-data/exchange-data.module';
 import { AutoStradleExecutionController } from './auto-stradle-execution.controller';
 import { AutoStradleRMSService } from './auto-stradle-rms.service';
 import { TelegramModule } from 'src/telegram/telegram.module';
+import { AutoSquareOffService } from './auto-square-off.service';
 
 @Module({
   imports: [
@@ -28,6 +29,7 @@ import { TelegramModule } from 'src/telegram/telegram.module';
     AutoStradleRuntimeHelper,
     AutoStradleExecutionService,
     AutoStradleRMSService, // ⭐ ADD THIS
+    AutoSquareOffService,
   ],
   exports: [AutoStradleStrategyService, AutoStradleRuntimeHelper],
 })

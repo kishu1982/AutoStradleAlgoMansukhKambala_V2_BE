@@ -76,7 +76,6 @@ export class AutoStradleRMSService implements OnModuleInit {
 
       const key = `${feed.e}|${feed.tk}`;
       // testing by sending price feed to telegram
-   
 
       // this.logger.debug(`Received tick for ${key}`);
       // this.logger.debug(feed);
@@ -127,7 +126,6 @@ export class AutoStradleRMSService implements OnModuleInit {
         }
         if (!netQty) continue;
 
-       
         hasOpenPosition = true;
 
         // 🔹 Direction-based exit price
@@ -1375,5 +1373,53 @@ Place exit again
     }
 
     return Math.floor(factor) * tickSize;
+  }
+  // =====================================================
+  // PUBLIC: TIME-BASED AUTO SQUARE OFF (called by AutoSquareOffService)
+  // =====================================================
+  public async triggerTimeBasedSquareOff(
+    reason: string = 'TIME_BASED_SQUAREOFF',
+  ): Promise<{ triggered: number }> {
+    try {
+      if (!this.activeConfigs?.length) {
+        return { triggered: 0 };
+      }
+
+      const netPositions = await this.exchangeDataService.getNetPositions();
+      let triggeredCount = 0;
+
+      for (const config of this.activeConfigs) {
+        // 🚫 Skip if already exiting/exited
+        if (config.exitStatus === 'EXITING' || config.exitStatus === 'EXITED') {
+          continue;
+        }
+
+        const hasOpenPosition = config.legsData?.some((leg) => {
+          const qty = this.getNetPositionQty(
+            netPositions,
+            leg.tokenNumber,
+            leg.exch,
+          );
+          return qty !== 0;
+        });
+
+        if (!hasOpenPosition) continue;
+
+        this.logger.warn(
+          `⏰ Auto square-off (${reason}) triggered for ${config._id}`,
+        );
+
+        await this.squareOffConfig(config, reason);
+        triggeredCount++;
+      }
+
+      return { triggered: triggeredCount };
+    } catch (error) {
+      this.logger.error(
+        'triggerTimeBasedSquareOff error',
+        error?.stack || error,
+      );
+      return { triggered: 0 };
+    }
   }
 }
