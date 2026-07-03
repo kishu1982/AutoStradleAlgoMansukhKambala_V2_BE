@@ -403,6 +403,87 @@ export class AutoStradleRMSService implements OnModuleInit {
     }
   }
 
+  // old working
+  // private getAvgPriceFromTrades(
+  //   trades: any[],
+  //   leg: any,
+  //   netQty: number,
+  // ): number {
+  //   try {
+  //     if (!netQty || !trades?.length) return 0;
+
+  //     const targetQty = Math.abs(netQty);
+
+  //     // STEP 1 — filter matching token
+  //     const tokenTrades = trades
+  //       .filter(
+  //         (t) =>
+  //           String(t.raw?.token) === String(leg.tokenNumber) &&
+  //           String(t.raw?.exch) === String(leg.exch),
+  //       )
+  //       .sort((a, b) => {
+  //         const format = (str: string) => {
+  //           const [datePart, timePart] = str.split(' ');
+  //           const [dd, mm, yyyy] = datePart.split('-');
+  //           return `${yyyy}${mm}${dd}${timePart.replace(/:/g, '')}`;
+  //         };
+
+  //         return format(b.raw.exch_tm).localeCompare(format(a.raw.exch_tm));
+  //       }); // latest first
+  //     // .sort(
+  //     //   (a, b) =>
+  //     //     new Date(b.raw.exch_tm).getTime() -
+  //     //     new Date(a.raw.exch_tm).getTime(),
+  //     // ); // 🔥 latest first
+
+  //     if (!tokenTrades.length) return 0;
+  //     // this.logger.debug(
+  //     //   `Found ${tokenTrades.length} trades for token ${leg.tokenNumber}`,
+  //     // );
+  //     // this.logger.debug('last trade price', tokenTrades[0].raw.flprc);
+  //     // this.logger.debug('last trade Time', tokenTrades[0].raw.exch_tm);
+
+  //     let remaining = targetQty;
+  //     let totalQty = 0;
+  //     let totalValue = 0;
+
+  //     // STEP 2 — walk from latest trades backward
+  //     for (const t of tokenTrades) {
+  //       if (remaining <= 0) break;
+
+  //       const tradeSide = t.raw.trantype;
+  //       const tradeQty = Number(t.raw.flqty || 0);
+  //       const tradePrice = Number(t.raw.flprc || 0);
+
+  //       // LONG position → consider BUY trades only
+  //       if (netQty > 0 && tradeSide !== 'B') continue;
+
+  //       // SHORT position → consider SELL trades only
+  //       if (netQty < 0 && tradeSide !== 'S') continue;
+
+  //       const usedQty = Math.min(tradeQty, remaining);
+
+  //       totalQty += usedQty;
+  //       totalValue += usedQty * tradePrice;
+
+  //       remaining -= usedQty;
+  //     }
+
+  //     if (!totalQty) return 0;
+
+  //     const avg = totalValue / totalQty;
+
+  //     // this.logger.debug(
+  //     //   `AVG CALC | token=${leg.tokenNumber} | netQty=${netQty} | avg=${avg}`,
+  //     // );
+
+  //     return avg;
+  //   } catch (error) {
+  //     this.logger.error('getAvgPriceFromTrades error', error);
+  //     return 0;
+  //   }
+  // }
+
   private getAvgPriceFromTrades(
     trades: any[],
     leg: any,
@@ -411,72 +492,76 @@ export class AutoStradleRMSService implements OnModuleInit {
     try {
       if (!netQty || !trades?.length) return 0;
 
-      const targetQty = Math.abs(netQty);
+      const parseTm = (str: string) => {
+        const [datePart, timePart] = str.split(' ');
+        const [dd, mm, yyyy] = datePart.split('-');
+        return `${yyyy}${mm}${dd}${timePart.replace(/:/g, '')}`;
+      };
 
-      // STEP 1 — filter matching token
+      // STEP 1 — filter matching token, sort OLDEST -> NEWEST (chronological)
       const tokenTrades = trades
         .filter(
           (t) =>
             String(t.raw?.token) === String(leg.tokenNumber) &&
             String(t.raw?.exch) === String(leg.exch),
         )
-        .sort((a, b) => {
-          const format = (str: string) => {
-            const [datePart, timePart] = str.split(' ');
-            const [dd, mm, yyyy] = datePart.split('-');
-            return `${yyyy}${mm}${dd}${timePart.replace(/:/g, '')}`;
-          };
-
-          return format(b.raw.exch_tm).localeCompare(format(a.raw.exch_tm));
-        }); // latest first
-      // .sort(
-      //   (a, b) =>
-      //     new Date(b.raw.exch_tm).getTime() -
-      //     new Date(a.raw.exch_tm).getTime(),
-      // ); // 🔥 latest first
+        .sort((a, b) =>
+          parseTm(a.raw.exch_tm).localeCompare(parseTm(b.raw.exch_tm)),
+        );
 
       if (!tokenTrades.length) return 0;
-      // this.logger.debug(
-      //   `Found ${tokenTrades.length} trades for token ${leg.tokenNumber}`,
-      // );
-      // this.logger.debug('last trade price', tokenTrades[0].raw.flprc);
-      // this.logger.debug('last trade Time', tokenTrades[0].raw.exch_tm);
 
-      let remaining = targetQty;
+      // STEP 2 — FIFO queue of currently-open lots
+      const queue: { qty: number; price: number; side: 'B' | 'S' }[] = [];
+
+      for (const t of tokenTrades) {
+        // let qty = Number(t.raw.flqty || 0);
+        let qty = Number(t.raw.qty || 0); // as trade data api send cumilitive quantity
+        const price = Number(t.raw.flprc || 0);
+        const side = t.raw.trantype as 'B' | 'S';
+
+        if (!qty || !price || (side !== 'B' && side !== 'S')) continue;
+
+        while (qty > 0) {
+          const front = queue[0];
+
+          if (!front || front.side === side) {
+            // same direction (or empty book) -> opens/extends a lot
+            queue.push({ qty, price, side });
+            qty = 0;
+          } else {
+            // opposite direction -> closes existing lot(s) FIFO
+            const matchQty = Math.min(front.qty, qty);
+            front.qty -= matchQty;
+            qty -= matchQty;
+            if (front.qty <= 0) queue.shift();
+          }
+        }
+      }
+
+      if (!queue.length) return 0;
+
+      // STEP 3 — sanity check vs broker netQty (log only, don't block)
+      const queuedQty = queue.reduce((s, l) => s + l.qty, 0);
+      const queuedSide = queue[0].side;
+      const expectedSide = netQty > 0 ? 'B' : 'S';
+
+      if (queuedSide !== expectedSide || queuedQty !== Math.abs(netQty)) {
+        this.logger.warn(
+          `AVG CALC mismatch | token=${leg.tokenNumber} broker netQty=${netQty} | FIFO queue side=${queuedSide} qty=${queuedQty}`,
+        );
+      }
+
+      // STEP 4 — weighted average of whatever is left open
       let totalQty = 0;
       let totalValue = 0;
 
-      // STEP 2 — walk from latest trades backward
-      for (const t of tokenTrades) {
-        if (remaining <= 0) break;
-
-        const tradeSide = t.raw.trantype;
-        const tradeQty = Number(t.raw.flqty || 0);
-        const tradePrice = Number(t.raw.flprc || 0);
-
-        // LONG position → consider BUY trades only
-        if (netQty > 0 && tradeSide !== 'B') continue;
-
-        // SHORT position → consider SELL trades only
-        if (netQty < 0 && tradeSide !== 'S') continue;
-
-        const usedQty = Math.min(tradeQty, remaining);
-
-        totalQty += usedQty;
-        totalValue += usedQty * tradePrice;
-
-        remaining -= usedQty;
+      for (const lot of queue) {
+        totalQty += lot.qty;
+        totalValue += lot.qty * lot.price;
       }
 
-      if (!totalQty) return 0;
-
-      const avg = totalValue / totalQty;
-
-      // this.logger.debug(
-      //   `AVG CALC | token=${leg.tokenNumber} | netQty=${netQty} | avg=${avg}`,
-      // );
-
-      return avg;
+      return totalQty ? totalValue / totalQty : 0;
     } catch (error) {
       this.logger.error('getAvgPriceFromTrades error', error);
       return 0;
