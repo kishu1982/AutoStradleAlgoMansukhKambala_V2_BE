@@ -1507,4 +1507,44 @@ Place exit again
       return { triggered: 0 };
     }
   }
+
+  // =====================================================
+  // CHECK IF MINIMUM REQUIRED QTY (PER CONFIG) IS BUILT
+  // =====================================================
+  private isMinimumQuantityBuilt(config: any, netPositions: any[]): boolean {
+    try {
+      const legs = config.legsData || [];
+      if (!legs.length) return false;
+
+      for (const leg of legs) {
+        const requiredLots = Number(leg.quantityLots || 0);
+
+        // no requirement configured for this leg -> skip check for it
+        if (requiredLots <= 0) continue;
+
+        const lotSize = this.getLotSizeFromPosition(
+          netPositions,
+          leg.tokenNumber,
+          leg.exch,
+        );
+
+        if (!lotSize) {
+          // can't verify yet (no position/lot info) -> treat as not ready
+          return false;
+        }
+
+        const requiredQty = requiredLots * lotSize;
+        const netQty = this.getNetQty(netPositions, leg);
+
+        if (Math.abs(netQty) < requiredQty) {
+          return false;
+        }
+      }
+
+      return true;
+    } catch (error) {
+      this.logger.error('isMinimumQuantityBuilt error', error?.stack || error);
+      return false;
+    }
+  }
 }
