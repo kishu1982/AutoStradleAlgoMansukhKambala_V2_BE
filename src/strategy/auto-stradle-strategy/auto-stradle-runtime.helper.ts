@@ -169,13 +169,24 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
         // when otmDifference > 0. When otmDifference is 0, both sit at ATM.
         let strike = leg.optionType === 'PE' ? mainLtp - diff : mainLtp + diff;
 
+        // const isIndexToken = this.indexMaster.some(
+        //   (i) => i.token.toString() === config.tokenNumber,
+        // );
         const isIndexToken = this.indexMaster.some(
-          (i) => i.token.toString() === config.tokenNumber,
+          (i) => Number(i.token) === Number(config.tokenNumber),
         );
 
         const roundStep = isIndexToken ? 50 : 100; // round step for index tokens is 50 NSE, for others is 100
         //const roundStep = isIndexToken ? 100 : 100;
-        strike = this.roundStrike(strike, roundStep);
+        // strike = this.roundStrike(strike, roundStep);
+        strike =
+          otmPercent > 0
+            ? this.roundStrike(
+                strike,
+                roundStep,
+                leg.optionType === 'PE' ? 'down' : 'up',
+              )
+            : this.roundStrike(strike, roundStep, 'nearest'); // ATM when otm is 0
 
         const instrument = this.instrumentData.find(
           (inst) =>
@@ -259,8 +270,21 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
   // =====================================================
   // ROUND STRIKE
   // =====================================================
-  private roundStrike(value: number, step: number): number {
+  // private roundStrike(value: number, step: number): number {
+  //   try {
+  //     return Math.round(value / step) * step;
+  //   } catch {
+  //     return value;
+  //   }
+  // }
+  private roundStrike(
+    value: number,
+    step: number,
+    direction: 'down' | 'up' | 'nearest' = 'nearest',
+  ): number {
     try {
+      if (direction === 'down') return Math.floor(value / step) * step;
+      if (direction === 'up') return Math.ceil(value / step) * step;
       return Math.round(value / step) * step;
     } catch {
       return value;
