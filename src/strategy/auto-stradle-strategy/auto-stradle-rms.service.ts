@@ -177,7 +177,19 @@ export class AutoStradleRMSService implements OnModuleInit {
       // ✅ CHECK FOR RMS EXIT
       // await this.checkRatioExit(config);
       // void this.runExitChecks(config);
-      await this.runExitChecks(config);
+
+      // await this.runExitChecks(config);
+
+      // ✅ CHECK FOR RMS EXIT
+      // await this.checkRatioExit(config);
+      // void this.runExitChecks(config);
+      if (this.isMinimumQuantityBuilt(config, netPositions)) {
+        await this.runExitChecks(config);
+      } else {
+        this.logger.debug(
+          `⏳ Waiting for full required qty to build before RMS checks: ${config._id}`,
+        );
+      }
 
       // ✅ RATIO CALCULATION
       const maxValue = Math.max(
