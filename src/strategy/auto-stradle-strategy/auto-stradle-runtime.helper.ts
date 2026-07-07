@@ -157,7 +157,16 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
       for (const leg of config.legsData || []) {
         if (!['NFO', 'BFO', 'MCX'].includes(leg.exch)) continue;
 
-        const diff = mainLtp * (config.otmDifference / 100);
+        // const diff = mainLtp * (config.otmDifference / 100);
+        // let strike = leg.optionType === 'PE' ? mainLtp - diff : mainLtp + diff;
+
+        // ⭐ FIX: always use a positive offset percentage so direction
+        // is never accidentally flipped by a negative otmDifference value
+        const otmPercent = Math.abs(config.otmDifference || 0);
+        const diff = otmPercent > 0 ? mainLtp * (otmPercent / 100) : 0;
+
+        // ⭐ PE is ALWAYS below main LTP, CE is ALWAYS above main LTP
+        // when otmDifference > 0. When otmDifference is 0, both sit at ATM.
         let strike = leg.optionType === 'PE' ? mainLtp - diff : mainLtp + diff;
 
         const isIndexToken = this.indexMaster.some(
