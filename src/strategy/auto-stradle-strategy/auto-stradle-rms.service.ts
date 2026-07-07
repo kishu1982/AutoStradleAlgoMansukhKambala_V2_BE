@@ -19,6 +19,11 @@ export class AutoStradleRMSService implements OnModuleInit {
   private priceMap = new Map<string, MarketTick>();
   private exitLocks = new Set<string>();
 
+  private positionStability = new Map<
+    string,
+    { legs: Map<string, { netQty: number; stableSince: number }> }
+  >(); // ⭐ ADD
+
   private readonly SAVE_PATH = path.join(
     process.cwd(),
     'data',
@@ -27,6 +32,7 @@ export class AutoStradleRMSService implements OnModuleInit {
 
   private readonly thresholdRatio: number;
   private readonly underlyingMovePercent: number;
+  private readonly stabilityWindowMs: number; // ⭐ ADD
 
   constructor(
     private readonly autoStradleService: AutoStradleStrategyService,
@@ -42,6 +48,10 @@ export class AutoStradleRMSService implements OnModuleInit {
     this.underlyingMovePercent = Number(
       this.configService.get('UNDERLYING_MOVE_EXIT_PCT', 2),
     ); // 2%
+
+    this.stabilityWindowMs = Number(
+      this.configService.get('RMS_POSITION_STABLE_MS', 2500),
+    ); // ⭐ ADD — how long qty must be unchanged before RMS runs
   }
 
   // =====================================================
@@ -160,7 +170,7 @@ export class AutoStradleRMSService implements OnModuleInit {
       }
 
       // ✅ UPDATE UNDERLYING INDEX PRICE
-      this.updateUnderlyingPrice(config);
+      this.updateUnderlyingPrice(config, hasOpenPosition);
 
       // 🔥 Strategy level values
       config.liveValue = totalLiveValue;
@@ -183,11 +193,19 @@ export class AutoStradleRMSService implements OnModuleInit {
       // ✅ CHECK FOR RMS EXIT
       // await this.checkRatioExit(config);
       // void this.runExitChecks(config);
-      if (this.isMinimumQuantityBuilt(config, netPositions)) {
+      // if (this.isMinimumQuantityBuilt(config, netPositions)) {
+      //   await this.runExitChecks(config);
+      // } else {
+      //   this.logger.debug(
+      //     `⏳ Waiting for full required qty to build before RMS checks: ${config._id}`,
+      //   );
+      // }
+      // ✅ CHECK FOR RMS EXIT
+      if (this.isPositionStable(config, netPositions)) {
         await this.runExitChecks(config);
       } else {
         this.logger.debug(
-          `⏳ Waiting for full required qty to build before RMS checks: ${config._id}`,
+          `⏳ Position still building/changing — RMS checks held for ${config._id}`,
         );
       }
 
@@ -617,11 +635,10 @@ export class AutoStradleRMSService implements OnModuleInit {
     );
   }
   // helper to update underling price and entry time (only if not set) on each tick
-  private updateUnderlyingPrice(config: any) {
+  private updateUnderlyingPrice(config: any, hasOpenPosition: boolean) {
     try {
       const key = `${config.exchange}|${config.tokenNumber}`;
       const tick = this.priceMap.get(key);
-
       if (!tick?.lp) return;
 
       if (!config.underlyingPrice) {
@@ -630,19 +647,44 @@ export class AutoStradleRMSService implements OnModuleInit {
 
       const nowIST = this.getISTTime();
 
-      // ✅ ENTRY PRICE — set only once
-      if (!config.underlyingPrice.entryPrice) {
+      // ✅ Only capture entry price once position actually exists
+      if (hasOpenPosition && !config.underlyingPrice.entryPrice) {
         config.underlyingPrice.entryPrice = Number(tick.lp);
         config.underlyingPrice.entryTimeIST = nowIST;
       }
 
-      // ✅ LIVE PRICE — update always
       config.underlyingPrice.livePrice = Number(tick.lp);
       config.underlyingPrice.liveTimeIST = nowIST;
     } catch (error) {
       this.logger.error('updateUnderlyingPrice error', error?.stack || error);
     }
   }
+  // private updateUnderlyingPrice(config: any) {
+  //   try {
+  //     const key = `${config.exchange}|${config.tokenNumber}`;
+  //     const tick = this.priceMap.get(key);
+
+  //     if (!tick?.lp) return;
+
+  //     if (!config.underlyingPrice) {
+  //       config.underlyingPrice = {};
+  //     }
+
+  //     const nowIST = this.getISTTime();
+
+  //     // ✅ ENTRY PRICE — set only once
+  //     if (!config.underlyingPrice.entryPrice) {
+  //       config.underlyingPrice.entryPrice = Number(tick.lp);
+  //       config.underlyingPrice.entryTimeIST = nowIST;
+  //     }
+
+  //     // ✅ LIVE PRICE — update always
+  //     config.underlyingPrice.livePrice = Number(tick.lp);
+  //     config.underlyingPrice.liveTimeIST = nowIST;
+  //   } catch (error) {
+  //     this.logger.error('updateUnderlyingPrice error', error?.stack || error);
+  //   }
+  // }
 
   // =====================================================
   // RATIO BASED RMS EXIT (NO EXECUTION SERVICE NEEDED)
@@ -770,6 +812,7 @@ LOCKED → ignored
       await this.executeRatioClose(config, reason);
 
       config.exitStatus = 'EXITED';
+      this.clearPositionStability(config._id); // ⭐ ADD to clear positions stability
     } catch (error) {
       this.logger.error('squareOffConfig error', error?.stack || error);
     } finally {
@@ -1523,40 +1566,97 @@ Place exit again
   // =====================================================
   // CHECK IF MINIMUM REQUIRED QTY (PER CONFIG) IS BUILT
   // =====================================================
-  private isMinimumQuantityBuilt(config: any, netPositions: any[]): boolean {
+  // private isMinimumQuantityBuilt(config: any, netPositions: any[]): boolean {
+  //   try {
+  //     const legs = config.legsData || [];
+  //     if (!legs.length) return false;
+
+  //     for (const leg of legs) {
+  //       const requiredLots = Number(leg.quantityLots || 0);
+
+  //       // no requirement configured for this leg -> skip check for it
+  //       if (requiredLots <= 0) continue;
+
+  //       const lotSize = this.getLotSizeFromPosition(
+  //         netPositions,
+  //         leg.tokenNumber,
+  //         leg.exch,
+  //       );
+
+  //       if (!lotSize) {
+  //         // can't verify yet (no position/lot info) -> treat as not ready
+  //         return false;
+  //       }
+
+  //       const requiredQty = requiredLots * lotSize;
+  //       const netQty = this.getNetQty(netPositions, leg);
+
+  //       if (Math.abs(netQty) < requiredQty) {
+  //         return false;
+  //       }
+  //     }
+
+  //     return true;
+  //   } catch (error) {
+  //     this.logger.error('isMinimumQuantityBuilt error', error?.stack || error);
+  //     return false;
+  //   }
+  // }
+
+  // =====================================================
+  // CHECK IF POSITION HAS STOPPED CHANGING (STABLE) FOR ALL LEGS
+  // =====================================================
+  // =====================================================
+  // CHECK IF POSITION HAS STOPPED CHANGING (STABLE) FOR ALL LEGS
+  // =====================================================
+  private isPositionStable(config: any, netPositions: any[]): boolean {
     try {
       const legs = config.legsData || [];
       if (!legs.length) return false;
 
+      const configId = String(config._id);
+      if (!this.positionStability.has(configId)) {
+        this.positionStability.set(configId, { legs: new Map() });
+      }
+      const tracker = this.positionStability.get(configId)!;
+
+      const now = Date.now();
+      let allStable = true;
+      let anyOpen = false;
+
       for (const leg of legs) {
-        const requiredLots = Number(leg.quantityLots || 0);
-
-        // no requirement configured for this leg -> skip check for it
-        if (requiredLots <= 0) continue;
-
-        const lotSize = this.getLotSizeFromPosition(
-          netPositions,
-          leg.tokenNumber,
-          leg.exch,
-        );
-
-        if (!lotSize) {
-          // can't verify yet (no position/lot info) -> treat as not ready
-          return false;
-        }
-
-        const requiredQty = requiredLots * lotSize;
+        const legKey = `${leg.exch}|${leg.tokenNumber}`;
         const netQty = this.getNetQty(netPositions, leg);
 
-        if (Math.abs(netQty) < requiredQty) {
-          return false;
+        if (netQty !== 0) anyOpen = true;
+
+        const prev = tracker.legs.get(legKey);
+
+        if (!prev || prev.netQty !== netQty) {
+          // qty changed (or first time seeing it) → reset the stability timer
+          tracker.legs.set(legKey, { netQty, stableSince: now });
+          allStable = false;
+          continue;
+        }
+
+        // qty unchanged since last check — check how long it's been stable
+        if (now - prev.stableSince < this.stabilityWindowMs) {
+          allStable = false;
         }
       }
 
-      return true;
+      // Require at least one leg open AND all legs unchanged for the full window
+      return anyOpen && allStable;
     } catch (error) {
-      this.logger.error('isMinimumQuantityBuilt error', error?.stack || error);
+      this.logger.error('isPositionStable error', error?.stack || error);
       return false;
     }
+  }
+
+  // =====================================================
+  // CLEANUP STABILITY TRACKER (call on exit / config removal)
+  // =====================================================
+  private clearPositionStability(configId: string) {
+    this.positionStability.delete(String(configId));
   }
 }
