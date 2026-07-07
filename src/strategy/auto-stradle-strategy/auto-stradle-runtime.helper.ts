@@ -169,12 +169,12 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
         // when otmDifference > 0. When otmDifference is 0, both sit at ATM.
         let strike = leg.optionType === 'PE' ? mainLtp - diff : mainLtp + diff;
 
-        // const isIndexToken = this.indexMaster.some(
-        //   (i) => i.token.toString() === config.tokenNumber,
-        // );
         const isIndexToken = this.indexMaster.some(
-          (i) => Number(i.token) === Number(config.tokenNumber),
+          (i) => i.token.toString() === config.tokenNumber,
         );
+        // const isIndexToken = this.indexMaster.some(
+        //   (i) => Number(i.token) === Number(config.tokenNumber),
+        // );
 
         const roundStep = isIndexToken ? 50 : 100; // round step for index tokens is 50 NSE, for others is 100
         //const roundStep = isIndexToken ? 100 : 100;
