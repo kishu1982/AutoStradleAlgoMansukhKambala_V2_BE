@@ -716,7 +716,7 @@ export class AutoStradleExecutionService implements OnModuleInit {
       let price: number | undefined;
 
       if (side === 'BUY') {
-        const bestAsk = Number(quote.sp5);
+        const bestAsk = Number(quote.sp1);
         if (!isNaN(bestAsk) && bestAsk > 0) {
           price = bestAsk + buffer; // cross the ask to guarantee priority
         } else if (!isNaN(ltp) && ltp > 0) {
@@ -726,7 +726,7 @@ export class AutoStradleExecutionService implements OnModuleInit {
           price = ltp + buffer;
         }
       } else {
-        const bestBid = Number(quote.bp5);
+        const bestBid = Number(quote.bp1);
         if (!isNaN(bestBid) && bestBid > 0) {
           price = bestBid - buffer;
         } else if (!isNaN(ltp) && ltp > 0) {
