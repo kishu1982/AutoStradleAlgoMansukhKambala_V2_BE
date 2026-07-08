@@ -1274,6 +1274,7 @@ squareOffConfig()
 executeRatioClose()
 */
 
+  // new manual square off with 3 attemps
   public async manualSquareOff(params: {
     tokenNumber: string;
     exchange: string;
@@ -1298,16 +1299,19 @@ executeRatioClose()
       }
 
       // Get latest real positions
-      const netPositions = await this.exchangeDataService.getNetPositions();
+      let netPositions = await this.exchangeDataService.getNetPositions();
 
       let triggeredCount = 0;
+      let failedCount = 0;
+
+      const MAX_ATTEMPTS = 3;
+      const RETRY_DELAY_MS = 1500;
 
       for (const config of matchedConfigs) {
-        // 🚫 Skip if already exiting/exited
-        if (config.exitStatus === 'EXITING' || config.exitStatus === 'EXITED') {
-          this.logger.warn(
-            `Skipping ${config._id} — exit already in progress or completed`,
-          );
+        // 🚫 Skip if already exiting (don't skip EXITED here — a stale
+        // EXITED flag from a previous failed manual attempt must not block retry)
+        if (config.exitStatus === 'EXITING') {
+          this.logger.warn(`Skipping ${config._id} — exit already in progress`);
           continue;
         }
 
@@ -1327,21 +1331,145 @@ executeRatioClose()
           continue;
         }
 
-        // ⭐ Trigger existing RMS exit logic
-        await this.squareOffConfig(config, 'MANUAL_EXIT');
+        // =====================================================
+        // ⭐ RETRY LOOP — attempt exit up to MAX_ATTEMPTS times,
+        // re-verifying actual net position after each attempt
+        // =====================================================
+        let closed = false;
 
-        triggeredCount++;
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+          this.logger.warn(
+            `🚨 Manual squareoff attempt ${attempt}/${MAX_ATTEMPTS} for ${config._id}`,
+          );
+
+          // ⭐ Reset a stale EXITED flag from a prior failed attempt so
+          // squareOffConfig() doesn't early-return on this retry
+          if (config.exitStatus === 'EXITED') {
+            config.exitStatus = undefined;
+          }
+
+          await this.squareOffConfig(config, `MANUAL_EXIT_ATTEMPT_${attempt}`);
+
+          // ⭐ Re-fetch fresh positions and verify actual closure —
+          // don't trust exitStatus alone, it can be 'EXITED' even on
+          // a partial/failed close (see executeRatioClose early-breaks)
+          netPositions = await this.exchangeDataService.getNetPositions();
+
+          const stillOpen = config.legsData.some((leg) => {
+            const qty = this.getNetPositionQty(
+              netPositions,
+              leg.tokenNumber,
+              leg.exch,
+            );
+            return qty !== 0;
+          });
+
+          if (!stillOpen) {
+            closed = true;
+            this.logger.warn(
+              `✅ Manual squareoff confirmed closed for ${config._id} on attempt ${attempt}`,
+            );
+            break;
+          }
+
+          this.logger.warn(
+            `⚠ Position still open after attempt ${attempt} for ${config._id}`,
+          );
+
+          if (attempt < MAX_ATTEMPTS) {
+            await new Promise((res) => setTimeout(res, RETRY_DELAY_MS));
+          }
+        }
+
+        if (closed) {
+          triggeredCount++;
+        } else {
+          failedCount++;
+          this.logger.error(
+            `❌ Manual squareoff FAILED to fully close ${config._id} after ${MAX_ATTEMPTS} attempts — manual check required`,
+          );
+        }
       }
 
       return {
-        success: true,
-        message: `Manual squareoff triggered for ${triggeredCount} config(s)`,
+        success: failedCount === 0,
+        message: `Manual squareoff: ${triggeredCount} closed, ${failedCount} failed after retries (of ${matchedConfigs.length} matched)`,
       };
     } catch (error) {
       this.logger.error('manualSquareOff error', error?.stack || error);
       throw error;
     }
   }
+
+  // old working
+  // public async manualSquareOff(params: {
+  //   tokenNumber: string;
+  //   exchange: string;
+  // }) {
+  //   try {
+  //     const exchange = String(params.exchange).trim().toUpperCase();
+  //     const tokenNumber = String(params.tokenNumber).trim();
+
+  //     const key = `${exchange}|${tokenNumber}`;
+
+  //     this.logger.warn(`🚨 Manual squareoff request received for ${key}`);
+
+  //     // ⭐ FAST lookup via underlyingIndex
+  //     const matchedConfigs = this.underlyingIndex.get(key);
+
+  //     if (!matchedConfigs?.length) {
+  //       this.logger.warn(`No configs mapped for ${key}`);
+  //       return {
+  //         success: false,
+  //         message: 'No matching stradle configs found',
+  //       };
+  //     }
+
+  //     // Get latest real positions
+  //     const netPositions = await this.exchangeDataService.getNetPositions();
+
+  //     let triggeredCount = 0;
+
+  //     for (const config of matchedConfigs) {
+  //       // 🚫 Skip if already exiting/exited
+  //       if (config.exitStatus === 'EXITING' || config.exitStatus === 'EXITED') {
+  //         this.logger.warn(
+  //           `Skipping ${config._id} — exit already in progress or completed`,
+  //         );
+  //         continue;
+  //       }
+
+  //       // ⭐ Check actual open positions
+  //       const hasOpenPosition = config.legsData.some((leg) => {
+  //         const qty = this.getNetPositionQty(
+  //           netPositions,
+  //           leg.tokenNumber,
+  //           leg.exch,
+  //         );
+
+  //         return qty !== 0;
+  //       });
+
+  //       if (!hasOpenPosition) {
+  //         this.logger.warn(`Skipping ${config._id} — no open positions`);
+  //         continue;
+  //       }
+
+  //       // ⭐ Trigger existing RMS exit logic
+  //       await this.squareOffConfig(config, 'MANUAL_EXIT');
+
+  //       triggeredCount++;
+  //     }
+
+  //     return {
+  //       success: true,
+  //       message: `Manual squareoff triggered for ${triggeredCount} config(s)`,
+  //     };
+  //   } catch (error) {
+  //     this.logger.error('manualSquareOff error', error?.stack || error);
+  //     throw error;
+  //   }
+  // }
 
   // helper fuction to wait for position update after exit order
 
