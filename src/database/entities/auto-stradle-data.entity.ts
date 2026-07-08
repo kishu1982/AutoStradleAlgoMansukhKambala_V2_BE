@@ -73,6 +73,17 @@ export class AutoStradleDataEntity {
   @Column()
   ltp?: number; // last traded price - Optional, can be updated from market data feed
 
+  // adding new data fields for amount multipliers and exit ratio
+  @Column({ type: 'number', default: 1 })
+  ceAmountMultiplier: number;
+
+  @Column({ type: 'number', default: 1 })
+  peAmountMultiplier: number;
+
+  @Column({ type: 'number', default: 1.75 })
+  exitRatio: number;
+
+  // timestamps for record keeping
   @CreateDateColumn()
   createdAt: Date;
 

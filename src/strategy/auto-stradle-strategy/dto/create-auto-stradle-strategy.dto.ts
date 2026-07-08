@@ -83,4 +83,20 @@ export class CreateAutoStradleStrategyDto {
   @IsOptional()
   @IsNumber()
   ltp?: number; // last traded price - Optional, can be updated from market data feed
+
+  // adding new data
+  @IsOptional()
+  @IsNumber()
+  @Min(0, { message: 'ceAmountMultiplier cannot be negative' })
+  ceAmountMultiplier?: number; // default 1 if not provided
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0, { message: 'peAmountMultiplier cannot be negative' })
+  peAmountMultiplier?: number; // default 1 if not provided
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0, { message: 'exitRatio cannot be negative' })
+  exitRatio?: number; // default 1.75 if not provided
 }

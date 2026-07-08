@@ -225,8 +225,17 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
         }
 
         // ⭐ CALCULATE QUANTITY
+        // const calculatedQty = this.calculateLegQuantity(
+        //   config.amountForLotCalEachLeg,
+        //   leg.legLtp,
+        //   instrument.lotSize,
+        // );
+        // ⭐ APPLY CE/PE AMOUNT MULTIPLIER BEFORE LOT CALCULATION
+        const effectiveAmount = this.getEffectiveAmountForLeg(config, leg);
+
+        // ⭐ CALCULATE QUANTITY
         const calculatedQty = this.calculateLegQuantity(
-          config.amountForLotCalEachLeg,
+          effectiveAmount,
           leg.legLtp,
           instrument.lotSize,
         );
@@ -339,6 +348,38 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
       this.logger.error(`calculateLegQuantity error`, error?.stack || error);
 
       return undefined;
+    }
+  }
+
+  // =====================================================
+  // GET EFFECTIVE AMOUNT FOR LEG BASED ON CE/PE MULTIPLIER
+  // =====================================================
+  private getEffectiveAmountForLeg(
+    config: AutoStradleDataEntity,
+    leg: any,
+  ): number {
+    try {
+      const baseAmount = config.amountForLotCalEachLeg;
+
+      if (!baseAmount) return baseAmount;
+
+      const ceMultiplier = config.ceAmountMultiplier ?? 1;
+      const peMultiplier = config.peAmountMultiplier ?? 1;
+
+      const multiplier =
+        leg.optionType === 'CE'
+          ? ceMultiplier
+          : leg.optionType === 'PE'
+            ? peMultiplier
+            : 1; // fallback for FUTIDX or unexpected types — no multiplier applied
+
+      return baseAmount * multiplier;
+    } catch (error) {
+      this.logger.error(
+        `getEffectiveAmountForLeg error`,
+        error?.stack || error,
+      );
+      return config.amountForLotCalEachLeg;
     }
   }
 

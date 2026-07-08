@@ -724,14 +724,33 @@ runExitChecks()
       this.logger.error('runExitChecks error', error?.stack || error);
     }
   }
+  // private async checkRatioExit(config: any) {
+  //   const shouldExit = config.legsData.some(
+  //     (leg) => Number(leg.valueRatio || 0) >= this.thresholdRatio,
+  //   );
+
+  //   if (!shouldExit) return;
+
+  //   await this.squareOffConfig(config, 'RATIO_THRESHOLD');
+  // }
   private async checkRatioExit(config: any) {
+    // ⭐ Use per-strategy exitRatio from config instead of global env threshold.
+    // Falls back to env-based thresholdRatio for any pre-existing config
+    // saved before the exitRatio field existed (Mongo won't have the field).
+    const ratioThreshold = Number(
+      config.exitRatio ?? this.thresholdRatio ?? 1.75,
+    );
+
     const shouldExit = config.legsData.some(
-      (leg) => Number(leg.valueRatio || 0) >= this.thresholdRatio,
+      (leg) => Number(leg.valueRatio || 0) >= ratioThreshold,
     );
 
     if (!shouldExit) return;
 
-    await this.squareOffConfig(config, 'RATIO_THRESHOLD');
+    await this.squareOffConfig(
+      config,
+      `RATIO_THRESHOLD(${ratioThreshold})`, // ⭐ include actual threshold used in exit reason for easier debugging/audit in logs & JSON file
+    );
   }
 
   // =====================================================

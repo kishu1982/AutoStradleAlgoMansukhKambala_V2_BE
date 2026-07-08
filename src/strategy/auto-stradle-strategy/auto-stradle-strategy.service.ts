@@ -81,6 +81,9 @@ export class AutoStradleStrategyService {
         stoplossBookingPercentage: dto.stoplossBookingPercentage,
         otmDifference: dto.otmDifference,
         status: dto.status || 'ACTIVE',
+        ceAmountMultiplier: dto.ceAmountMultiplier ?? 1,
+        peAmountMultiplier: dto.peAmountMultiplier ?? 1,
+        exitRatio: dto.exitRatio ?? 1.75,
       });
 
       const savedConfig = await this.autoStradleRepo.save(newConfig);
@@ -272,6 +275,12 @@ export class AutoStradleStrategyService {
       config.status = dto.status || config.status;
       // ⭐ ADD THIS LINE
       config.ltp = dto.ltp ?? config.ltp;
+      // adding new data of amount multipliers and exit ratio
+      config.ceAmountMultiplier =
+        dto.ceAmountMultiplier ?? config.ceAmountMultiplier ?? 1;
+      config.peAmountMultiplier =
+        dto.peAmountMultiplier ?? config.peAmountMultiplier ?? 1;
+      config.exitRatio = dto.exitRatio ?? config.exitRatio ?? 1.75;
 
       const result = await this.autoStradleRepo.save(config);
 
