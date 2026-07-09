@@ -1573,6 +1573,10 @@ Place exit again
   // =====================================================
   // RMS LIMIT PRICE RESOLVER (DEPTH BASED)
   // =====================================================
+  // new with max 10% far price
+  // =====================================================
+  // RMS LIMIT PRICE RESOLVER (DEPTH BASED)
+  // =====================================================
   private getRmsLimitPrice(
     leg: any,
     netQty: number,
@@ -1592,30 +1596,39 @@ Place exit again
       leg.exch,
     );
 
+    // ⭐ Max 10% aggressive buffer from best bid/ask — was 25%/33% before,
+    // which could push the limit price past the circuit limit and get
+    // the exit order rejected entirely.
+    const MAX_PRICE_BUFFER = 0.1; // means 10% below best bid for exit sell, 10% above best ask for exit buy
+
     let rawPrice: number | undefined;
 
     // ===============================
-    // LONG → exit SELL → aggressive bid
+    // LONG → exit SELL → aggressive bid, capped at 10% below
     // ===============================
     if (netQty > 0) {
       if (!tick.bp1) return undefined;
 
-      rawPrice = Number(tick.bp1) * 0.75;
+      rawPrice = Number(tick.bp1) * (1 - MAX_PRICE_BUFFER);
 
-      this.logger.debug(`EXIT SELL rawPrice=${rawPrice} (bp1*0.75)`);
+      this.logger.debug(
+        `EXIT SELL rawPrice=${rawPrice} (bp1 * ${1 - MAX_PRICE_BUFFER})`,
+      );
 
       rawPrice = this.roundToTick(rawPrice, tickSize, 'DOWN');
     }
 
     // ===============================
-    // SHORT → exit BUY → aggressive ask
+    // SHORT → exit BUY → aggressive ask, capped at 10% above
     // ===============================
     else if (netQty < 0) {
       if (!tick.sp1) return undefined;
 
-      rawPrice = Number(tick.sp1) / 0.75;
+      rawPrice = Number(tick.sp1) * (1 + MAX_PRICE_BUFFER);
 
-      this.logger.debug(`EXIT BUY rawPrice=${rawPrice} (sp1/0.75)`);
+      this.logger.debug(
+        `EXIT BUY rawPrice=${rawPrice} (sp1 * ${1 + MAX_PRICE_BUFFER})`,
+      );
 
       rawPrice = this.roundToTick(rawPrice, tickSize, 'UP');
     }
@@ -1626,6 +1639,61 @@ Place exit again
 
     return Number(rawPrice.toFixed(8));
   }
+
+  // old working with too far price entry
+  // private getRmsLimitPrice(
+  //   leg: any,
+  //   netQty: number,
+  //   netPositions: any[],
+  // ): number | undefined {
+  //   const key = `${leg.exch}|${leg.tokenNumber}`;
+  //   const tick = this.priceMap.get(key);
+
+  //   if (!tick) {
+  //     this.logger.error(`No tick data for ${key}`);
+  //     return undefined;
+  //   }
+
+  //   const tickSize = this.getTickSizeFromPosition(
+  //     netPositions,
+  //     leg.tokenNumber,
+  //     leg.exch,
+  //   );
+
+  //   let rawPrice: number | undefined;
+
+  //   // ===============================
+  //   // LONG → exit SELL → aggressive bid
+  //   // ===============================
+  //   if (netQty > 0) {
+  //     if (!tick.bp1) return undefined;
+
+  //     rawPrice = Number(tick.bp1) * 0.75;
+
+  //     this.logger.debug(`EXIT SELL rawPrice=${rawPrice} (bp1*0.75)`);
+
+  //     rawPrice = this.roundToTick(rawPrice, tickSize, 'DOWN');
+  //   }
+
+  //   // ===============================
+  //   // SHORT → exit BUY → aggressive ask
+  //   // ===============================
+  //   else if (netQty < 0) {
+  //     if (!tick.sp1) return undefined;
+
+  //     rawPrice = Number(tick.sp1) / 0.75;
+
+  //     this.logger.debug(`EXIT BUY rawPrice=${rawPrice} (sp1/0.75)`);
+
+  //     rawPrice = this.roundToTick(rawPrice, tickSize, 'UP');
+  //   }
+
+  //   if (!rawPrice || rawPrice <= 0 || isNaN(rawPrice)) {
+  //     return undefined;
+  //   }
+
+  //   return Number(rawPrice.toFixed(8));
+  // }
 
   // ============================================
   // GET TICK SIZE FROM NET POSITION
