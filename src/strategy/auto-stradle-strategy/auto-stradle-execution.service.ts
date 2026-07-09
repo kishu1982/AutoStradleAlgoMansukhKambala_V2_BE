@@ -220,12 +220,11 @@ export class AutoStradleExecutionService implements OnModuleInit {
 
           break; // Exit loop safely
         }
-
         // ==============================
         // PLACE LIMIT ORDERS
         // ==============================
 
-        await Promise.all([
+        const [orderResA, orderResB] = await Promise.all([
           qtyA > 0
             ? this.ordersService.placeOrder({
                 buy_or_sell: legA.side === 'BUY' ? 'B' : 'S',
@@ -241,7 +240,7 @@ export class AutoStradleExecutionService implements OnModuleInit {
                 amo: 'NO',
                 remarks: `AUTO STRADLE A`,
               })
-            : Promise.resolve(),
+            : Promise.resolve(undefined),
 
           qtyB > 0
             ? this.ordersService.placeOrder({
@@ -258,11 +257,58 @@ export class AutoStradleExecutionService implements OnModuleInit {
                 amo: 'NO',
                 remarks: `AUTO STRADLE B`,
               })
-            : Promise.resolve(),
+            : Promise.resolve(undefined),
         ]);
 
+        this.logger.debug(
+          `Order placement response A: ${JSON.stringify(orderResA)} | B: ${JSON.stringify(orderResB)}`,
+        );
+
+        // ==============================
+        // WAIT FOR UPDATE
+        // ==============================
+
+        const changed = await this.waitForPositionUpdate(
+          legA,
+          legB,
+          netAUnits,
+          netBUnits,
+          8000,
+        );
+
+        if (!changed) {
+          // ⭐ Log remaining lots so it's clear from logs alone how much
+          // was actually left unfilled when the loop stopped early
+          this.logger.error(
+            `Position did not update. Stopping to prevent duplicate execution. ` +
+              `Remaining A=${remainingALots} B=${remainingBLots} (config=${config._id})`,
+          );
+          break;
+        }
+
+        // ==============================
+        // CHECK REJECTIONS — only for orders from THIS batch, not any
+        // rejection in a rolling window (which could belong to a
+        // different, unrelated order and wrongly abort the whole run)
+        // ==============================
+
+        const latestOrders = await this.exchangeDataService.getOrders();
+
+        const thisBatchRejected = this.hasThisOrderRejected(
+          latestOrders,
+          orderResA,
+          orderResB,
+        );
+
+        if (thisBatchRejected) {
+          this.logger.error(
+            `This batch's order was rejected. Stopping execution. ` +
+              `Remaining A=${remainingALots} B=${remainingBLots} (config=${config._id})`,
+          );
+          break;
+        }
         // // ==============================
-        // // PLACE ORDERS
+        // // PLACE LIMIT ORDERS
         // // ==============================
 
         // await Promise.all([
@@ -273,8 +319,8 @@ export class AutoStradleExecutionService implements OnModuleInit {
         //         exchange: legA.exch,
         //         tradingsymbol: legA.tradingSymbol,
         //         quantity: qtyA,
-        //         price_type: 'MKT',
-        //         price: 0,
+        //         price_type: 'LMT',
+        //         price: priceA,
         //         trigger_price: 0,
         //         discloseqty: 0,
         //         retention: 'DAY',
@@ -290,8 +336,8 @@ export class AutoStradleExecutionService implements OnModuleInit {
         //         exchange: legB.exch,
         //         tradingsymbol: legB.tradingSymbol,
         //         quantity: qtyB,
-        //         price_type: 'MKT',
-        //         price: 0,
+        //         price_type: 'LMT',
+        //         price: priceB,
         //         trigger_price: 0,
         //         discloseqty: 0,
         //         retention: 'DAY',
@@ -301,37 +347,77 @@ export class AutoStradleExecutionService implements OnModuleInit {
         //     : Promise.resolve(),
         // ]);
 
-        // ==============================
-        // WAIT FOR UPDATE
-        // ==============================
+        // // // ==============================
+        // // // PLACE ORDERS
+        // // // ==============================
 
-        const changed = await this.waitForPositionUpdate(
-          legA,
-          legB,
-          netAUnits,
-          netBUnits,
-          8000,
-        );
+        // // await Promise.all([
+        // //   qtyA > 0
+        // //     ? this.ordersService.placeOrder({
+        // //         buy_or_sell: legA.side === 'BUY' ? 'B' : 'S',
+        // //         product_type: this.resolveProductType(config.productType),
+        // //         exchange: legA.exch,
+        // //         tradingsymbol: legA.tradingSymbol,
+        // //         quantity: qtyA,
+        // //         price_type: 'MKT',
+        // //         price: 0,
+        // //         trigger_price: 0,
+        // //         discloseqty: 0,
+        // //         retention: 'DAY',
+        // //         amo: 'NO',
+        // //         remarks: `AUTO STRADLE A`,
+        // //       })
+        // //     : Promise.resolve(),
 
-        if (!changed) {
-          this.logger.error(
-            'Position did not update. Stopping to prevent duplicate execution.',
-          );
-          break;
-        }
+        // //   qtyB > 0
+        // //     ? this.ordersService.placeOrder({
+        // //         buy_or_sell: legB.side === 'BUY' ? 'B' : 'S',
+        // //         product_type: this.resolveProductType(config.productType),
+        // //         exchange: legB.exch,
+        // //         tradingsymbol: legB.tradingSymbol,
+        // //         quantity: qtyB,
+        // //         price_type: 'MKT',
+        // //         price: 0,
+        // //         trigger_price: 0,
+        // //         discloseqty: 0,
+        // //         retention: 'DAY',
+        // //         amo: 'NO',
+        // //         remarks: `AUTO STRADLE B`,
+        // //       })
+        // //     : Promise.resolve(),
+        // // ]);
 
-        // ==============================
-        // CHECK REJECTIONS
-        // ==============================
+        // // ==============================
+        // // WAIT FOR UPDATE
+        // // ==============================
 
-        const latestOrders = await this.exchangeDataService.getOrders();
+        // const changed = await this.waitForPositionUpdate(
+        //   legA,
+        //   legB,
+        //   netAUnits,
+        //   netBUnits,
+        //   8000,
+        // );
 
-        if (this.hasRecentRejection(latestOrders, legA, legB, 60)) {
-          this.logger.error(
-            'Recent rejection detected (within 1 minute). Stopping execution.',
-          );
-          break;
-        }
+        // if (!changed) {
+        //   this.logger.error(
+        //     'Position did not update. Stopping to prevent duplicate execution.',
+        //   );
+        //   break;
+        // }
+
+        // // ==============================
+        // // CHECK REJECTIONS
+        // // ==============================
+
+        // const latestOrders = await this.exchangeDataService.getOrders();
+
+        // if (this.hasRecentRejection(latestOrders, legA, legB, 60)) {
+        //   this.logger.error(
+        //     'Recent rejection detected (within 1 minute). Stopping execution.',
+        //   );
+        //   break;
+        // }
       }
     } catch (err) {
       this.logger.error('executeStradle error', err?.stack || err);
@@ -878,6 +964,30 @@ export class AutoStradleExecutionService implements OnModuleInit {
         message: 'Failed to fetch trade data',
         data: null,
       };
+    }
+  }
+
+  // =====================================================
+  // Check if a SPECIFIC order (by order ID) was rejected
+  // =====================================================
+  private hasThisOrderRejected(
+    orders: ExchangeOrder[],
+    orderResA: any,
+    orderResB: any,
+  ): boolean {
+    try {
+      const idA = orderResA?.norenordno || orderResA?.orderId;
+      const idB = orderResB?.norenordno || orderResB?.orderId;
+
+      if (!idA && !idB) return false;
+
+      return orders.some((o: any) => {
+        const oid = o.raw?.norenordno;
+        return (oid === idA || oid === idB) && o.raw?.status === 'REJECTED';
+      });
+    } catch (err) {
+      this.logger.error('hasThisOrderRejected error', err?.stack || err);
+      return false;
     }
   }
 }
