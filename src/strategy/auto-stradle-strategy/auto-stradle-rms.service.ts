@@ -1153,7 +1153,8 @@ loop ends only when BOTH zero
               price: priceA,
               trigger_price: 0,
               discloseqty: 0,
-              retention: 'DAY',
+              // retention: 'DAY',
+              retention: 'IOC',
               amo: 'NO',
               remarks: `AUTO STRADLE EXIT A (${reason})`,
             })
@@ -1170,7 +1171,8 @@ loop ends only when BOTH zero
               price: priceB,
               trigger_price: 0,
               discloseqty: 0,
-              retention: 'DAY',
+              // retention: 'DAY',
+              retention: 'IOC',
               amo: 'NO',
               remarks: `AUTO STRADLE EXIT B (${reason})`,
             })
