@@ -236,7 +236,8 @@ export class AutoStradleExecutionService implements OnModuleInit {
                 price: priceA,
                 trigger_price: 0,
                 discloseqty: 0,
-                retention: 'DAY',
+                // retention: 'DAY',
+                retention: 'IOC', // placing ioc order for leg A to avoid pending orders in case of partial fill of leg B
                 amo: 'NO',
                 remarks: `AUTO STRADLE A`,
               })
@@ -253,7 +254,8 @@ export class AutoStradleExecutionService implements OnModuleInit {
                 price: priceB,
                 trigger_price: 0,
                 discloseqty: 0,
-                retention: 'DAY',
+                // retention: 'DAY',
+                retention: 'IOC', // placing ioc order for leg B to avoid pending orders in case of partial fill of leg A
                 amo: 'NO',
                 remarks: `AUTO STRADLE B`,
               })
@@ -777,6 +779,7 @@ export class AutoStradleExecutionService implements OnModuleInit {
   // =====================================================
   // GET LIMIT PRICE FROM QUOTES
   // =====================================================
+  // new logic with buffer of 10%
   private async getLimitPrice(
     exch: string,
     token: string,
@@ -795,38 +798,27 @@ export class AutoStradleExecutionService implements OnModuleInit {
       const lowerCircuit = Number(quote.lc);
       const ltp = Number(quote.lp);
 
-      // Aggressive buffer to cross the spread and improve fill probability
-      // during fast moves (2 ticks here — tune per instrument if needed)
-      const buffer = tickSize * 2;
-
-      let price: number | undefined;
+      let basePrice: number | undefined;
 
       if (side === 'BUY') {
         const bestAsk = Number(quote.sp5);
-        if (!isNaN(bestAsk) && bestAsk > 0) {
-          price = bestAsk + buffer; // cross the ask to guarantee priority
-        } else if (!isNaN(ltp) && ltp > 0) {
-          this.logger.warn(
-            `No ask depth for ${quote.tsym}, falling back to LTP`,
-          );
-          price = ltp + buffer;
-        }
+        basePrice = !isNaN(bestAsk) && bestAsk > 0 ? bestAsk : ltp;
       } else {
         const bestBid = Number(quote.bp5);
-        if (!isNaN(bestBid) && bestBid > 0) {
-          price = bestBid - buffer;
-        } else if (!isNaN(ltp) && ltp > 0) {
-          this.logger.warn(
-            `No bid depth for ${quote.tsym}, falling back to LTP`,
-          );
-          price = ltp - buffer;
-        }
+        basePrice = !isNaN(bestBid) && bestBid > 0 ? bestBid : ltp;
       }
 
-      if (price === undefined || isNaN(price)) {
-        this.logger.error(`Unable to derive price for ${quote.tsym}`);
+      if (!basePrice || isNaN(basePrice) || basePrice <= 0) {
+        this.logger.error(`Unable to derive base price for ${quote.tsym}`);
         return undefined;
       }
+
+      // 10% directional buffer instead of a flat 2-tick buffer
+      const bufferPct = 0.1;
+      let price =
+        side === 'BUY'
+          ? basePrice * (1 + bufferPct)
+          : basePrice * (1 - bufferPct);
 
       // Never breach exchange circuit limits
       if (!isNaN(upperCircuit) && upperCircuit > 0 && price > upperCircuit) {
@@ -840,7 +832,7 @@ export class AutoStradleExecutionService implements OnModuleInit {
       price = Math.round(price / tickSize) * tickSize;
 
       this.logger.debug(
-        `${side} limit price for ${quote.tsym}: ${price} (bp1=${quote.bp1}, sp1=${quote.sp1}, lp=${quote.lp})`,
+        `${side} limit price (10% buffer) for ${quote.tsym}: ${price} (base=${basePrice})`,
       );
 
       return price;
@@ -849,6 +841,80 @@ export class AutoStradleExecutionService implements OnModuleInit {
       return undefined;
     }
   }
+
+  // older with small 2 % ticke buffer
+  // private async getLimitPrice(
+  //   exch: string,
+  //   token: string,
+  //   side: 'BUY' | 'SELL',
+  // ): Promise<number | undefined> {
+  //   try {
+  //     const quote = await this.marketService.getQuotes({ exch, token });
+
+  //     if (!quote || quote.stat !== 'Ok') {
+  //       this.logger.error('Quote fetch failed', quote);
+  //       return undefined;
+  //     }
+
+  //     const tickSize = Number(quote.ti) || 0.05;
+  //     const upperCircuit = Number(quote.uc);
+  //     const lowerCircuit = Number(quote.lc);
+  //     const ltp = Number(quote.lp);
+
+  //     // Aggressive buffer to cross the spread and improve fill probability
+  //     // during fast moves (2 ticks here — tune per instrument if needed)
+  //     const buffer = tickSize * 2;
+
+  //     let price: number | undefined;
+
+  //     if (side === 'BUY') {
+  //       const bestAsk = Number(quote.sp5);
+  //       if (!isNaN(bestAsk) && bestAsk > 0) {
+  //         price = bestAsk + buffer; // cross the ask to guarantee priority
+  //       } else if (!isNaN(ltp) && ltp > 0) {
+  //         this.logger.warn(
+  //           `No ask depth for ${quote.tsym}, falling back to LTP`,
+  //         );
+  //         price = ltp + buffer;
+  //       }
+  //     } else {
+  //       const bestBid = Number(quote.bp5);
+  //       if (!isNaN(bestBid) && bestBid > 0) {
+  //         price = bestBid - buffer;
+  //       } else if (!isNaN(ltp) && ltp > 0) {
+  //         this.logger.warn(
+  //           `No bid depth for ${quote.tsym}, falling back to LTP`,
+  //         );
+  //         price = ltp - buffer;
+  //       }
+  //     }
+
+  //     if (price === undefined || isNaN(price)) {
+  //       this.logger.error(`Unable to derive price for ${quote.tsym}`);
+  //       return undefined;
+  //     }
+
+  //     // Never breach exchange circuit limits
+  //     if (!isNaN(upperCircuit) && upperCircuit > 0 && price > upperCircuit) {
+  //       price = upperCircuit;
+  //     }
+  //     if (!isNaN(lowerCircuit) && price < lowerCircuit) {
+  //       price = lowerCircuit;
+  //     }
+
+  //     // Snap to valid tick size
+  //     price = Math.round(price / tickSize) * tickSize;
+
+  //     this.logger.debug(
+  //       `${side} limit price for ${quote.tsym}: ${price} (bp1=${quote.bp1}, sp1=${quote.sp1}, lp=${quote.lp})`,
+  //     );
+
+  //     return price;
+  //   } catch (err) {
+  //     this.logger.error('getLimitPrice error', err?.stack || err);
+  //     return undefined;
+  //   }
+  // }
   // old wokring with simple bp5 sp5
   // private async getLimitPrice(
   //   exch: string,
