@@ -33,6 +33,7 @@ export class AutoStradleRMSService implements OnModuleInit {
   private readonly thresholdRatio: number;
   private readonly underlyingMovePercent: number;
   private readonly stabilityWindowMs: number; // ⭐ ADD
+  private readonly stepLots: number; // ⭐ For ratio
 
   constructor(
     private readonly autoStradleService: AutoStradleStrategyService,
@@ -52,6 +53,9 @@ export class AutoStradleRMSService implements OnModuleInit {
     this.stabilityWindowMs = Number(
       this.configService.get('RMS_POSITION_STABLE_MS', 2500),
     ); // ⭐ ADD — how long qty must be unchanged before RMS runs
+
+    // ⭐ ADD — same env var as execution file, keeps entry/exit step size in sync
+    this.stepLots = Number(this.configService.get('STRADLE_STEP_LOTS', 1)) || 1;
   }
 
   // =====================================================
@@ -995,7 +999,7 @@ loop ends only when BOTH zero
     if (!legA || !legB) return;
 
     const MAX_ORDER_LOTS = 25;
-    const STEP_LOTS = 1; // lots per leg per order while BOTH legs still open
+    // const STEP_LOTS = 1; // lots per leg per order while BOTH legs still open
 
     // ⭐ scale loop budget with actual position size so large positions
     // don't get cut off mid-exit by a fixed low ceiling
@@ -1088,7 +1092,7 @@ loop ends only when BOTH zero
         netA,
         netB,
         MAX_ORDER_LOTS,
-        STEP_LOTS,
+        this.stepLots,
       );
 
       let qtyA = exitLotsA * lotSizeA;

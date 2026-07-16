@@ -16,14 +16,16 @@ import { fileURLToPath } from 'url';
 export class AutoStradleExecutionService implements OnModuleInit {
   private readonly logger = new Logger(AutoStradleExecutionService.name);
 
+  // setting up for ratio value
   private executionEnabled: boolean;
+  private readonly stepLots: number; // ⭐ For ratio
 
   private activeExecutions = new Set<string>();
   // ⭐ strongly typed map
   private instrumentMap = new Map<string, InstrumentInfo>();
 
   // decouple size of ratio helpign veriables
-  private readonly STEP_LOTS = 1; // lots placed per leg, per order, while both legs still have pending qty
+  // private readonly STEP_LOTS = 1; // lots placed per leg, per order, while both legs still have pending qty
   private readonly MAX_LOTS_PER_ORDER = 10; // hard cap for a single order once only one leg is left pending
 
   constructor(
@@ -37,6 +39,10 @@ export class AutoStradleExecutionService implements OnModuleInit {
     this.executionEnabled =
       this.configService.get<string>('ACTIVATE_STRADLE_EXECUTION', 'false') ===
       'true';
+
+    // for ratio
+    // ⭐ ADD — defaults to 1 if not set or invalid in .env
+    this.stepLots = Number(this.configService.get('STRADLE_STEP_LOTS', 1)) || 1;
   }
 
   // =====================================================
@@ -541,8 +547,8 @@ export class AutoStradleExecutionService implements OnModuleInit {
 
       if (remainingA > 0 && remainingB > 0) {
         // Both legs still pending → step together, 1 lot each side per order
-        batchA = Math.min(this.STEP_LOTS, remainingA);
-        batchB = Math.min(this.STEP_LOTS, remainingB);
+        batchA = Math.min(this.stepLots, remainingA);
+        batchB = Math.min(this.stepLots, remainingB);
       } else if (remainingA > 0) {
         // Only leg A left → complete the difference, capped
         batchA = Math.min(this.MAX_LOTS_PER_ORDER, remainingA);
