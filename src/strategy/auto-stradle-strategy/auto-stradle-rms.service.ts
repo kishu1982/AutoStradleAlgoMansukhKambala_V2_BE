@@ -995,7 +995,13 @@ loop ends only when BOTH zero
     if (!legA || !legB) return;
 
     const MAX_ORDER_LOTS = 25;
-    const MAX_LOOP = 50;
+    const STEP_LOTS = 1; // lots per leg per order while BOTH legs still open
+
+    // ⭐ scale loop budget with actual position size so large positions
+    // don't get cut off mid-exit by a fixed low ceiling
+    const approxTotalLots =
+      Number(legA.quantityLots || 0) + Number(legB.quantityLots || 0);
+    const MAX_LOOP = Math.max(50, approxTotalLots + 20);
 
     let loopCount = 0;
 
@@ -1050,44 +1056,40 @@ loop ends only when BOTH zero
       const remainingALots = Math.floor(Math.abs(netA) / lotSizeA);
       const remainingBLots = Math.floor(Math.abs(netB) / lotSizeB);
 
-      let exitLotsA = 0;
-      let exitLotsB = 0;
+      // let exitLotsA = 0;
+      // let exitLotsB = 0;
 
       // ======================
-      // FINAL CLEANUP MODE
+      // FINAL CLEANUP MODE — only one leg still has qty
       // ======================
 
-      if (netA === 0 || netB === 0) {
-        this.logger.warn(`Final cleanup mode`);
+      // if (netA === 0 || netB === 0) {
+      //   this.logger.warn(`Final cleanup mode`);
 
-        exitLotsA = remainingALots;
-        exitLotsB = remainingBLots;
-      } else {
-        const ratioA = Number(legA.quantityLots || 1);
-        const ratioB = Number(legB.quantityLots || 1);
+      //   // ⭐ cap even the single-leg cleanup, don't dump it all in one order
+      //   exitLotsA = Math.min(remainingALots, MAX_ORDER_LOTS);
+      //   exitLotsB = Math.min(remainingBLots, MAX_ORDER_LOTS);
+      // } else {
+      //   // ======================
+      //   // BOTH LEGS STILL OPEN — step down together, one lot per leg
+      //   // per order (mirrors entry-side execution logic)
+      //   // ======================
 
-        const maxRatioBatch = Math.min(
-          Math.floor(remainingALots / ratioA),
-          Math.floor(remainingBLots / ratioB),
-        );
+      //   exitLotsA = Math.min(STEP_LOTS, remainingALots);
+      //   exitLotsB = Math.min(STEP_LOTS, remainingBLots);
 
-        if (maxRatioBatch > 0) {
-          const allowedBatch = Math.min(
-            maxRatioBatch,
-            Math.floor(MAX_ORDER_LOTS / Math.max(ratioA, ratioB)),
-          );
-
-          exitLotsA = allowedBatch * ratioA;
-          exitLotsB = allowedBatch * ratioB;
-
-          this.logger.warn(`Ratio batch exit mode`);
-        } else {
-          this.logger.warn(`Fallback exit mode`);
-
-          exitLotsA = Math.min(remainingALots, MAX_ORDER_LOTS);
-          exitLotsB = Math.min(remainingBLots, MAX_ORDER_LOTS);
-        }
-      }
+      //   this.logger.warn(`Stepped exit mode (1:1)`);
+      // }
+      const { exitLotsA, exitLotsB } = this.calculateExitBatch(
+        legA,
+        legB,
+        remainingALots,
+        remainingBLots,
+        netA,
+        netB,
+        MAX_ORDER_LOTS,
+        STEP_LOTS,
+      );
 
       let qtyA = exitLotsA * lotSizeA;
       let qtyB = exitLotsB * lotSizeB;
@@ -1153,8 +1155,8 @@ loop ends only when BOTH zero
               price: priceA,
               trigger_price: 0,
               discloseqty: 0,
-              retention: 'DAY',
-              // retention: 'IOC',
+              // retention: 'DAY',
+              retention: 'IOC',
               amo: 'NO',
               remarks: `AUTO STRADLE EXIT A (${reason})`,
             })
@@ -1171,49 +1173,13 @@ loop ends only when BOTH zero
               price: priceB,
               trigger_price: 0,
               discloseqty: 0,
-              retention: 'DAY',
-              // retention: 'IOC',
+              // retention: 'DAY',
+              retention: 'IOC',
               amo: 'NO',
               remarks: `AUTO STRADLE EXIT B (${reason})`,
             })
           : Promise.resolve(),
       ]);
-
-      // await Promise.all([
-      //   qtyA > 0
-      //     ? this.ordersService.placeOrder({
-      //         buy_or_sell: netA > 0 ? 'S' : 'B',
-      //         product_type: config.productType === 'INTRADAY' ? 'I' : 'M',
-      //         exchange: legA.exch,
-      //         tradingsymbol: legA.tradingSymbol,
-      //         quantity: qtyA,
-      //         price_type: 'MKT',
-      //         price: 0,
-      //         trigger_price: 0,
-      //         discloseqty: 0,
-      //         retention: 'DAY',
-      //         amo: 'NO',
-      //         remarks: `AUTO STRADLE EXIT A (${reason})`,
-      //       })
-      //     : Promise.resolve(),
-
-      //   qtyB > 0
-      //     ? this.ordersService.placeOrder({
-      //         buy_or_sell: netB > 0 ? 'S' : 'B',
-      //         product_type: config.productType === 'INTRADAY' ? 'I' : 'M',
-      //         exchange: legB.exch,
-      //         tradingsymbol: legB.tradingSymbol,
-      //         quantity: qtyB,
-      //         price_type: 'MKT',
-      //         price: 0,
-      //         trigger_price: 0,
-      //         discloseqty: 0,
-      //         retention: 'DAY',
-      //         amo: 'NO',
-      //         remarks: `AUTO STRADLE EXIT B (${reason})`,
-      //       })
-      //     : Promise.resolve(),
-      // ]);
 
       const updated = await this.waitForPositionUpdate(
         config,
@@ -1230,14 +1196,292 @@ loop ends only when BOTH zero
     }
   }
 
+  // private async executeRatioClose(config: any, reason: string) {
+  //   if (config.exitStatus !== 'EXITING') return;
+
+  //   const [legA, legB] = config.legsData;
+  //   if (!legA || !legB) return;
+
+  //   const MAX_ORDER_LOTS = 25;
+  //   const MAX_LOOP = 50;
+
+  //   let loopCount = 0;
+
+  //   while (true) {
+  //     loopCount++;
+
+  //     if (loopCount > MAX_LOOP) {
+  //       this.logger.error(`Exit max loop reached ${config._id}`);
+  //       break;
+  //     }
+
+  //     const netPositions = await this.exchangeDataService.getNetPositions();
+
+  //     const netA = this.getNetPositionQty(
+  //       netPositions,
+  //       legA.tokenNumber,
+  //       legA.exch,
+  //     );
+
+  //     const netB = this.getNetPositionQty(
+  //       netPositions,
+  //       legB.tokenNumber,
+  //       legB.exch,
+  //     );
+
+  //     // ======================
+  //     // EXIT COMPLETE
+  //     // ======================
+
+  //     if (netA === 0 && netB === 0) {
+  //       this.logger.warn(`Exit fully completed ${config._id}`);
+  //       break;
+  //     }
+
+  //     const lotSizeA = this.getLotSizeFromPosition(
+  //       netPositions,
+  //       legA.tokenNumber,
+  //       legA.exch,
+  //     );
+
+  //     const lotSizeB = this.getLotSizeFromPosition(
+  //       netPositions,
+  //       legB.tokenNumber,
+  //       legB.exch,
+  //     );
+
+  //     if (!lotSizeA || !lotSizeB) {
+  //       this.logger.error(`Lot size missing`);
+  //       break;
+  //     }
+
+  //     const remainingALots = Math.floor(Math.abs(netA) / lotSizeA);
+  //     const remainingBLots = Math.floor(Math.abs(netB) / lotSizeB);
+
+  //     let exitLotsA = 0;
+  //     let exitLotsB = 0;
+
+  //     // ======================
+  //     // FINAL CLEANUP MODE
+  //     // ======================
+
+  //     if (netA === 0 || netB === 0) {
+  //       this.logger.warn(`Final cleanup mode`);
+
+  //       exitLotsA = remainingALots;
+  //       exitLotsB = remainingBLots;
+  //     } else {
+  //       const ratioA = Number(legA.quantityLots || 1);
+  //       const ratioB = Number(legB.quantityLots || 1);
+
+  //       const maxRatioBatch = Math.min(
+  //         Math.floor(remainingALots / ratioA),
+  //         Math.floor(remainingBLots / ratioB),
+  //       );
+
+  //       if (maxRatioBatch > 0) {
+  //         const allowedBatch = Math.min(
+  //           maxRatioBatch,
+  //           Math.floor(MAX_ORDER_LOTS / Math.max(ratioA, ratioB)),
+  //         );
+
+  //         exitLotsA = allowedBatch * ratioA;
+  //         exitLotsB = allowedBatch * ratioB;
+
+  //         this.logger.warn(`Ratio batch exit mode`);
+  //       } else {
+  //         this.logger.warn(`Fallback exit mode`);
+
+  //         exitLotsA = Math.min(remainingALots, MAX_ORDER_LOTS);
+  //         exitLotsB = Math.min(remainingBLots, MAX_ORDER_LOTS);
+  //       }
+  //     }
+
+  //     let qtyA = exitLotsA * lotSizeA;
+  //     let qtyB = exitLotsB * lotSizeB;
+
+  //     qtyA = Math.min(qtyA, Math.abs(netA));
+  //     qtyB = Math.min(qtyB, Math.abs(netB));
+
+  //     if (qtyA <= 0 && qtyB <= 0) {
+  //       this.logger.warn(`Nothing to exit — stopping`);
+  //       break;
+  //     }
+
+  //     this.logger.warn(
+  //       `Exit batch | netA=${netA} qtyA=${qtyA} | netB=${netB} qtyB=${qtyB}`,
+  //     );
+
+  //     // ==============================
+  //     // GET LIMIT PRICES FOR BOTH LEGS
+  //     // ==============================
+
+  //     const priceA =
+  //       qtyA > 0 ? this.getRmsLimitPrice(legA, netA, netPositions) : undefined;
+
+  //     const priceB =
+  //       qtyB > 0 ? this.getRmsLimitPrice(legB, netB, netPositions) : undefined;
+
+  //     // ==============================
+  //     // VALIDATE BOTH PRICES
+  //     // ==============================
+
+  //     const legAPriceMissing = qtyA > 0 && priceA === undefined;
+  //     const legBPriceMissing = qtyB > 0 && priceB === undefined;
+
+  //     if (legAPriceMissing || legBPriceMissing) {
+  //       if (legAPriceMissing) {
+  //         this.logger.error(`EXIT price missing LEG A ${legA.tradingSymbol}`);
+  //       }
+
+  //       if (legBPriceMissing) {
+  //         this.logger.error(`EXIT price missing LEG B ${legB.tradingSymbol}`);
+  //       }
+
+  //       this.logger.error(
+  //         `Both exit prices required. Skipping batch for ${config._id}`,
+  //       );
+
+  //       break; // DO NOT PLACE PARTIAL EXIT
+  //     }
+
+  //     // ==============================
+  //     // PLACE LIMIT EXIT ORDERS
+  //     // ==============================
+
+  //     await Promise.all([
+  //       qtyA > 0
+  //         ? this.ordersService.placeOrder({
+  //             buy_or_sell: netA > 0 ? 'S' : 'B',
+  //             product_type: config.productType === 'INTRADAY' ? 'I' : 'M',
+  //             exchange: legA.exch,
+  //             tradingsymbol: legA.tradingSymbol,
+  //             quantity: qtyA,
+  //             price_type: 'LMT',
+  //             price: priceA,
+  //             trigger_price: 0,
+  //             discloseqty: 0,
+  //             retention: 'DAY',
+  //             // retention: 'IOC',
+  //             amo: 'NO',
+  //             remarks: `AUTO STRADLE EXIT A (${reason})`,
+  //           })
+  //         : Promise.resolve(),
+
+  //       qtyB > 0
+  //         ? this.ordersService.placeOrder({
+  //             buy_or_sell: netB > 0 ? 'S' : 'B',
+  //             product_type: config.productType === 'INTRADAY' ? 'I' : 'M',
+  //             exchange: legB.exch,
+  //             tradingsymbol: legB.tradingSymbol,
+  //             quantity: qtyB,
+  //             price_type: 'LMT',
+  //             price: priceB,
+  //             trigger_price: 0,
+  //             discloseqty: 0,
+  //             retention: 'DAY',
+  //             // retention: 'IOC',
+  //             amo: 'NO',
+  //             remarks: `AUTO STRADLE EXIT B (${reason})`,
+  //           })
+  //         : Promise.resolve(),
+  //     ]);
+
+  //     // await Promise.all([
+  //     //   qtyA > 0
+  //     //     ? this.ordersService.placeOrder({
+  //     //         buy_or_sell: netA > 0 ? 'S' : 'B',
+  //     //         product_type: config.productType === 'INTRADAY' ? 'I' : 'M',
+  //     //         exchange: legA.exch,
+  //     //         tradingsymbol: legA.tradingSymbol,
+  //     //         quantity: qtyA,
+  //     //         price_type: 'MKT',
+  //     //         price: 0,
+  //     //         trigger_price: 0,
+  //     //         discloseqty: 0,
+  //     //         retention: 'DAY',
+  //     //         amo: 'NO',
+  //     //         remarks: `AUTO STRADLE EXIT A (${reason})`,
+  //     //       })
+  //     //     : Promise.resolve(),
+
+  //     //   qtyB > 0
+  //     //     ? this.ordersService.placeOrder({
+  //     //         buy_or_sell: netB > 0 ? 'S' : 'B',
+  //     //         product_type: config.productType === 'INTRADAY' ? 'I' : 'M',
+  //     //         exchange: legB.exch,
+  //     //         tradingsymbol: legB.tradingSymbol,
+  //     //         quantity: qtyB,
+  //     //         price_type: 'MKT',
+  //     //         price: 0,
+  //     //         trigger_price: 0,
+  //     //         discloseqty: 0,
+  //     //         retention: 'DAY',
+  //     //         amo: 'NO',
+  //     //         remarks: `AUTO STRADLE EXIT B (${reason})`,
+  //     //       })
+  //     //     : Promise.resolve(),
+  //     // ]);
+
+  //     const updated = await this.waitForPositionUpdate(
+  //       config,
+  //       legA,
+  //       legB,
+  //       netA,
+  //       netB,
+  //     );
+
+  //     if (!updated) {
+  //       this.logger.error(`Position not updated — stopping`);
+  //       break;
+  //     }
+  //   }
+  // }
+
   // batch calculator
 
-  private calculateExitBatch(legA, legB, remainingA, remainingB) {
-    return {
-      [legA.tokenNumber]: remainingA > 0 ? 1 : 0,
-      [legB.tokenNumber]: remainingB > 0 ? 1 : 0,
-    };
+  // =====================================================
+  // CALCULATE EXIT BATCH (single source of truth for exit sizing)
+  // =====================================================
+  private calculateExitBatch(
+    legA: any,
+    legB: any,
+    remainingALots: number,
+    remainingBLots: number,
+    netA: number,
+    netB: number,
+    maxOrderLots: number,
+    stepLots: number,
+  ): { exitLotsA: number; exitLotsB: number; mode: string } {
+    let exitLotsA = 0;
+    let exitLotsB = 0;
+    let mode: string;
+
+    if (netA === 0 || netB === 0) {
+      // Only one leg has qty left → cleanup, but still capped
+      mode = 'CLEANUP';
+      exitLotsA = Math.min(remainingALots, maxOrderLots);
+      exitLotsB = Math.min(remainingBLots, maxOrderLots);
+    } else {
+      // Both legs still open → step together
+      mode = 'STEPPED';
+      exitLotsA = Math.min(stepLots, remainingALots);
+      exitLotsB = Math.min(stepLots, remainingBLots);
+    }
+
+    this.logger.warn(
+      `[calculateExitBatch] mode=${mode} | remainingALots=${remainingALots} remainingBLots=${remainingBLots} ` +
+        `| netA=${netA} netB=${netB} | → exitLotsA=${exitLotsA} exitLotsB=${exitLotsB}`,
+    );
+
+    return { exitLotsA, exitLotsB, mode };
   }
+  // private calculateExitBatch(legA, legB, remainingA, remainingB) {
+  //   return {
+  //     [legA.tokenNumber]: remainingA > 0 ? 1 : 0,
+  //     [legB.tokenNumber]: remainingB > 0 ? 1 : 0,
+  //   };
+  // }
   // old working
   // private calculateExitBatch(legA, legB, remainingA, remainingB) {
   //   const ratioA = legA.quantityLots || 1;

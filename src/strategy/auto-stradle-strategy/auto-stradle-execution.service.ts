@@ -22,6 +22,10 @@ export class AutoStradleExecutionService implements OnModuleInit {
   // ⭐ strongly typed map
   private instrumentMap = new Map<string, InstrumentInfo>();
 
+  // decouple size of ratio helpign veriables
+  private readonly STEP_LOTS = 1; // lots placed per leg, per order, while both legs still have pending qty
+  private readonly MAX_LOTS_PER_ORDER = 10; // hard cap for a single order once only one leg is left pending
+
   constructor(
     private readonly configService: ConfigService,
     private readonly ordersService: OrdersService,
@@ -117,7 +121,8 @@ export class AutoStradleExecutionService implements OnModuleInit {
       const sideMultiplierB = legB.side === 'BUY' ? 1 : -1;
 
       let loopCount = 0;
-      const MAX_LOOP = 10;
+      // const MAX_LOOP = 10;
+      const MAX_LOOP = desiredALots + desiredBLots + 20; // generous safety buffer, scales with order size
 
       while (true) {
         loopCount++;
@@ -528,18 +533,23 @@ export class AutoStradleExecutionService implements OnModuleInit {
   // =====================================================
   // Calculate batch sizes for legs based on ratios
   // =====================================================
+  // new code to place trade 1 by 1 dcoupled
   private calculateBatch(legA, legB, remainingA: number, remainingB: number) {
     try {
-      const ratioA = legA.ratio || 1;
-      const ratioB = legB.ratio || 1;
+      let batchA = 0;
+      let batchB = 0;
 
-      // ⭐ batch = ratio itself
-      let batchA = ratioA;
-      let batchB = ratioB;
-
-      // clamp by remaining lots
-      batchA = Math.min(batchA, remainingA);
-      batchB = Math.min(batchB, remainingB);
+      if (remainingA > 0 && remainingB > 0) {
+        // Both legs still pending → step together, 1 lot each side per order
+        batchA = Math.min(this.STEP_LOTS, remainingA);
+        batchB = Math.min(this.STEP_LOTS, remainingB);
+      } else if (remainingA > 0) {
+        // Only leg A left → complete the difference, capped
+        batchA = Math.min(this.MAX_LOTS_PER_ORDER, remainingA);
+      } else if (remainingB > 0) {
+        // Only leg B left → complete the difference, capped
+        batchB = Math.min(this.MAX_LOTS_PER_ORDER, remainingB);
+      }
 
       return {
         [legA.tokenNumber]: batchA,
@@ -547,13 +557,40 @@ export class AutoStradleExecutionService implements OnModuleInit {
       };
     } catch (error) {
       this.logger.error('calculateBatch error', error?.stack || error);
-
       return {
         [legA.tokenNumber]: 0,
         [legB.tokenNumber]: 0,
       };
     }
   }
+
+  // old code for calulationg ration and placing batch trade at 1 time
+  // private calculateBatch(legA, legB, remainingA: number, remainingB: number) {
+  //   try {
+  //     const ratioA = legA.ratio || 1;
+  //     const ratioB = legB.ratio || 1;
+
+  //     // ⭐ batch = ratio itself
+  //     let batchA = ratioA;
+  //     let batchB = ratioB;
+
+  //     // clamp by remaining lots
+  //     batchA = Math.min(batchA, remainingA);
+  //     batchB = Math.min(batchB, remainingB);
+
+  //     return {
+  //       [legA.tokenNumber]: batchA,
+  //       [legB.tokenNumber]: batchB,
+  //     };
+  //   } catch (error) {
+  //     this.logger.error('calculateBatch error', error?.stack || error);
+
+  //     return {
+  //       [legA.tokenNumber]: 0,
+  //       [legB.tokenNumber]: 0,
+  //     };
+  //   }
+  // }
 
   // =====================================================
   // count recent rejects for a given token and exchange
