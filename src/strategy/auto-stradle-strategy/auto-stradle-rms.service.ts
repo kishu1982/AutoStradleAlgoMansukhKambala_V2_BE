@@ -623,6 +623,14 @@ export class AutoStradleRMSService implements OnModuleInit {
 
       leg1.valueRatio = v2 > 0 ? v1 / v2 : 0;
       leg2.valueRatio = v1 > 0 ? v2 / v1 : 0;
+
+      // for invested ratio data
+      // ── INVESTED VALUE RATIO (⭐ NEW) ──
+      const iv1 = Math.abs(leg1.investedValue || 0);
+      const iv2 = Math.abs(leg2.investedValue || 0);
+
+      leg1.valueRatioInvested = iv2 > 0 ? iv1 / iv2 : 0;
+      leg2.valueRatioInvested = iv1 > 0 ? iv2 / iv1 : 0;
     } catch (error) {
       this.logger.error('updateLegValueRatios error', error?.stack || error);
     }
@@ -737,25 +745,71 @@ runExitChecks()
 
   //   await this.squareOffConfig(config, 'RATIO_THRESHOLD');
   // }
+
+  // new version of checking ratio with invested ration value
   private async checkRatioExit(config: any) {
-    // ⭐ Use per-strategy exitRatio from config instead of global env threshold.
-    // Falls back to env-based thresholdRatio for any pre-existing config
-    // saved before the exitRatio field existed (Mongo won't have the field).
-    const ratioThreshold = Number(
-      config.exitRatio ?? this.thresholdRatio ?? 1.75,
+    // ⭐ CHANGED: exitRatio is now a DEVIATION BAND (± around each leg's
+    // invested-value ratio), not an absolute ceiling like before.
+    // Exit fires when a leg's live valueRatio drifts more than
+    // ±deviationThreshold away from its valueRatioInvested baseline.
+    //
+    // e.g. investedRatio = 1.10, deviationThreshold = 0.25
+    //   → exit if liveRatio >= 1.35  OR  liveRatio <= 0.85
+    const deviationThreshold = Number(
+      config.exitRatio ?? this.thresholdRatio ?? 0.5,
     );
 
-    const shouldExit = config.legsData.some(
-      (leg) => Number(leg.valueRatio || 0) >= ratioThreshold,
-    );
+    let triggeredLeg: any = null;
+    let triggeredInfo = '';
 
-    if (!shouldExit) return;
+    for (const leg of config.legsData || []) {
+      const investedRatio = Number(leg.valueRatioInvested || 0);
+      const liveRatio = Number(leg.valueRatio || 0);
+
+      // No valid invested baseline yet (e.g. right after entry, before
+      // avg price / investedValue settled) → skip, can't evaluate drift
+      if (!investedRatio) continue;
+
+      const upperBound = investedRatio + deviationThreshold;
+      const lowerBound = investedRatio - deviationThreshold;
+
+      if (liveRatio >= upperBound || liveRatio <= lowerBound) {
+        triggeredLeg = leg;
+        triggeredInfo =
+          `leg=${leg.tradingSymbol} liveRatio=${liveRatio.toFixed(4)} ` +
+          `investedRatio=${investedRatio.toFixed(4)} ` +
+          `band=[${lowerBound.toFixed(4)}, ${upperBound.toFixed(4)}]`;
+        break;
+      }
+    }
+
+    if (!triggeredLeg) return;
 
     await this.squareOffConfig(
       config,
-      `RATIO_THRESHOLD(${ratioThreshold})`, // ⭐ include actual threshold used in exit reason for easier debugging/audit in logs & JSON file
+      `RATIO_DEVIATION(${deviationThreshold}) ${triggeredInfo}`,
     );
   }
+  // old verion to just check with live ratio
+  // private async checkRatioExit(config: any) {
+  //   // ⭐ Use per-strategy exitRatio from config instead of global env threshold.
+  //   // Falls back to env-based thresholdRatio for any pre-existing config
+  //   // saved before the exitRatio field existed (Mongo won't have the field).
+  //   const ratioThreshold = Number(
+  //     config.exitRatio ?? this.thresholdRatio ?? 1.75,
+  //   );
+
+  //   const shouldExit = config.legsData.some(
+  //     (leg) => Number(leg.valueRatio || 0) >= ratioThreshold,
+  //   );
+
+  //   if (!shouldExit) return;
+
+  //   await this.squareOffConfig(
+  //     config,
+  //     `RATIO_THRESHOLD(${ratioThreshold})`, // ⭐ include actual threshold used in exit reason for easier debugging/audit in logs & JSON file
+  //   );
+  // }
 
   // =====================================================
   // UNDERLYING BASED RMS EXIT (NO EXECUTION SERVICE NEEDED)
