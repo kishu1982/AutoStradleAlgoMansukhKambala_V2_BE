@@ -216,8 +216,16 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
         );
 
         if (!isPositionOpen) {
-          leg.tokenNumber = String(instrument.token);
-          leg.tradingSymbol = instrument.tradingSymbol;
+          const newToken = String(instrument.token);
+          const newSymbol = instrument.tradingSymbol;
+
+          // leg.tokenNumber = String(instrument.token);
+          // leg.tradingSymbol = instrument.tradingSymbol;
+          if (leg.tokenNumber !== newToken || leg.tradingSymbol !== newSymbol) {
+            leg.tokenNumber = newToken;
+            leg.tradingSymbol = newSymbol;
+            isUpdated = true; // ⭐ only true on real change
+          }
         } else {
           this.logger.debug(
             `Strike locked for ${leg.tradingSymbol} — position already open.`,
@@ -240,12 +248,24 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
           instrument.lotSize,
         );
 
-        if (calculatedQty !== undefined) {
+        // if (calculatedQty !== undefined) {
+        //   leg.quantityLots = calculatedQty;
+        // }
+        if (calculatedQty !== undefined && leg.quantityLots !== calculatedQty) {
           leg.quantityLots = calculatedQty;
+          isUpdated = true; // ⭐ only true on real change
         }
 
+        // run ratio calc, then check if ratios actually changed vs previous
+        const prevRatios = config.legsData.map((l) => l.ratio);
         // ⭐ AFTER updating quantities for all legs adding ratio calculation based on quantity
         this.calculateLegRatios(config.legsData);
+
+        const ratiosChanged = config.legsData.some(
+          (l, i) => l.ratio !== prevRatios[i],
+        );
+        if (ratiosChanged) isUpdated = true;
+        // completed comarison of data with previous data and updated the ratio if changed
 
         const legKey = `${leg.exch}|${instrument.token}`;
         const legTick = this.marketDataMap.get(legKey);
