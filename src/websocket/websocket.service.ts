@@ -7,10 +7,11 @@ import {
 import { TokenService } from '../token/token.service';
 import { StrategyService } from 'src/strategy/strategy.service';
 import { WS_SUBSCRIPTIONS } from './subscriptions/ws.subscriptions';
-import { read } from 'fs';
+// import { read } from 'fs';
 import { AutoStradleStrategyService } from 'src/strategy/auto-stradle-strategy';
 import { ExchangeDataService } from 'src/strategy/exchange-data/exchange-data.service';
 import { AutoStradleRuntimeHelper } from 'src/strategy/auto-stradle-strategy/auto-stradle-runtime.helper';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 
 const NorenWebSocket = require('norenrestapi/lib/websocket');
 
@@ -30,6 +31,7 @@ export class WebsocketService implements OnModuleInit, OnModuleDestroy {
     private readonly autoStradleStrategyService: AutoStradleStrategyService,
     private readonly exchangeDataService: ExchangeDataService,
     private readonly autoStradleRuntime: AutoStradleRuntimeHelper,
+    private readonly eventEmitter: EventEmitter2, // for pushing data out of tick
   ) {}
 
   /* ===============================
@@ -115,6 +117,9 @@ export class WebsocketService implements OnModuleInit, OnModuleDestroy {
           // 🔥 Forward tick to Strategy module
           this.strategyService.onTick(tick);
           this.autoStradleRuntime.handleWebsocketTick(tick);
+          // 🔥 broadcast raw tick to any connected frontend clients
+          // this.logger.log(`🔥 EMITTING market.tick | ltp=${tick?.lp}`); // TEMP
+          this.eventEmitter.emit('market.tick', tick);
 
           // console.log(
           //   `📈 PRICE | ${tick.e || ''}|${tick.tk || ''} | LTP: ${

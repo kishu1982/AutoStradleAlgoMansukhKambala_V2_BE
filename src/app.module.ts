@@ -13,6 +13,7 @@ import { StrategyModule } from './strategy/strategy.module';
 import { ScheduleModule } from '@nestjs/schedule';
 import { RequestLoggerMiddleware } from './common/middleware/logger/request-logger.middleware';
 import { TelegramModule } from './telegram/telegram.module';
+import { MarketDataOutModule } from './market-data-out/market-data-out.module';
 
 @Module({
   imports: [
@@ -26,7 +27,8 @@ import { TelegramModule } from './telegram/telegram.module';
     DatabaseModule,
     StrategyModule,
     ScheduleModule.forRoot(),
-    TelegramModule, // ✅ REQUIRED
+    TelegramModule,
+    MarketDataOutModule, // ✅ REQUIRED
   ],
   controllers: [AppController],
   providers: [AppService],
