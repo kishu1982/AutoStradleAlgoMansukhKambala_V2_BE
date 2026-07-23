@@ -118,7 +118,7 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
   // CRON RUNNER (EVERY 2 SECONDS)
   // =====================================================
   // @Cron('*/2 * * * * *')
-  @Cron('*/10 * * * * *')
+  @Cron('*/5 * * * * *')
   async runtimeProcessor() {
     if (this.isCronRunning) return;
 
