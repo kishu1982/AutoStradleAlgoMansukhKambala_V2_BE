@@ -93,7 +93,8 @@ export class AutoStradleRMSService implements OnModuleInit {
 
       // this.logger.debug(`Received tick for ${key}`);
       // this.logger.debug(feed);
-      this.logger.debug(`Tick received for key=${key}`);
+      // temp remove
+      // this.logger.debug(`Tick received for key=${key}`);
 
       // ⭐ Merge tick safely
       const updatedTick = this.mergeTickData(key, feed);
@@ -115,7 +116,7 @@ export class AutoStradleRMSService implements OnModuleInit {
     netPositions: any[],
   ): Promise<boolean> {
     try {
-      this.logger.debug(`Processing config ${config._id}`);
+      // this.logger.debug(`Processing config ${config._id}`);
 
       let totalLiveValue = 0;
       let totalInvestedValue = 0;
@@ -136,7 +137,8 @@ export class AutoStradleRMSService implements OnModuleInit {
 
         const netQty = this.getNetQty(netPositions, leg);
         if (!netQty) {
-          this.logger.warn(`NetQty ZERO for ${key} `);
+          // temp stoping this log
+          // this.logger.warn(`NetQty ZERO for ${key} `);
         }
         if (!netQty) continue;
 
@@ -208,9 +210,10 @@ export class AutoStradleRMSService implements OnModuleInit {
       if (this.isPositionStable(config, netPositions)) {
         await this.runExitChecks(config);
       } else {
-        this.logger.debug(
-          `⏳ Position still building/changing — RMS checks held for ${config._id}`,
-        );
+        // temp stoping
+        // this.logger.debug(
+        //   `⏳ Position still building/changing — RMS checks held for ${config._id}`,
+        // );
       }
 
       // ✅ RATIO CALCULATION

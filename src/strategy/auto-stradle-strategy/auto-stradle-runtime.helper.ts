@@ -9,6 +9,14 @@ import * as path from 'path';
 import { AutoStradleRMSService } from './auto-stradle-rms.service';
 import { ExchangeDataService } from '../exchange-data/exchange-data.service';
 
+// making it dynamic
+interface IndexMasterEntry {
+  exchange: string;
+  symbol: string;
+  token: number;
+  roundStep: number; // strike rounding step for this symbol
+}
+
 @Injectable()
 export class AutoStradleRuntimeHelper implements OnModuleInit {
   private readonly logger = new Logger(AutoStradleRuntimeHelper.name);
@@ -19,11 +27,22 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
 
   private isCronRunning = false; // prevent overlap
 
-  private readonly indexMaster = [
-    { exchange: 'NSE', symbol: 'NIFTY', token: 26000 },
-    // { exchange: 'NSE', symbol: 'NIFTY 50', token: 26000 },
-    { exchange: 'BSE', symbol: 'SENSEX', token: 1 },
-    { exchange: 'NSE', symbol: 'BANKNIFTY', token: 26009 },
+  // private readonly indexMaster = [
+  //   { exchange: 'NSE', symbol: 'NIFTY', token: 26000 },
+  //   { exchange: 'NFO', symbol: 'NIFTY', token: 61093 },
+  //   // { exchange: 'NSE', symbol: 'NIFTY 50', token: 26000 },
+  //   { exchange: 'NSE', symbol: 'BANKNIFTY', token: 26009 },
+  //   { exchange: 'BSE', symbol: 'SENSEX', token: 1 },
+  //   { exchange: 'BFO', symbol: 'SENSEX', token: 1144507 },
+  // ];
+
+  // making it dynamic
+  private indexMaster: IndexMasterEntry[] = [
+    { exchange: 'NSE', symbol: 'NIFTY', token: 26000, roundStep: 50 },
+    // { exchange: 'NFO', symbol: 'NIFTY', token: 61093, roundStep: 50 },
+    { exchange: 'NSE', symbol: 'BANKNIFTY', token: 26009, roundStep: 100 },
+    { exchange: 'BSE', symbol: 'SENSEX', token: 1, roundStep: 100 },
+    // { exchange: 'BFO', symbol: 'SENSEX', token: 1144507, roundStep: 100 },
   ];
 
   constructor(
@@ -144,13 +163,18 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
     try {
       const mainKey = `${config.exchange}|${config.tokenNumber}`;
       const mainTick = this.marketDataMap.get(mainKey);
+
+      // this.logger.debug(
+      //   `Main LTP for ${config.strategyName}: Symbol/token ${mainKey} ${mainTick?.lp} and updated Main LTP in config: ${config.ltp}`,
+      // );
+
       if (!mainTick?.lp) return;
 
       const mainLtp = mainTick.lp;
       config.ltp = mainLtp;
 
       // this.logger.debug(
-      //   `Main LTP for ${config.strategyName}: ${mainTick?.lp} and updated Main LTP in config: ${config.ltp}`,
+      //   `Main LTP for ${config.strategyName}: Symbol/token ${mainKey} ${mainTick?.lp} and updated Main LTP in config: ${config.ltp}`,
       // );
 
       let isUpdated = false;
@@ -170,14 +194,29 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
         // when otmDifference > 0. When otmDifference is 0, both sit at ATM.
         let strike = leg.optionType === 'PE' ? mainLtp - diff : mainLtp + diff;
 
-        const isIndexToken = this.indexMaster.some(
-          (i) => i.token.toString() === config.tokenNumber,
-        );
         // const isIndexToken = this.indexMaster.some(
-        //   (i) => Number(i.token) === Number(config.tokenNumber),
+        //   (i) => i.token.toString() === config.tokenNumber,
+        // );
+        // // const isIndexToken = this.indexMaster.some(
+        // //   (i) => Number(i.token) === Number(config.tokenNumber),
+        // // );
+
+        // const roundStep = isIndexToken ? 50 : 100; // round step for index tokens is 50 NSE, for others is 100
+
+        // find the specific index entry that matches this config's token (and exchange, to avoid collisions)
+        // const matchedIndex = this.indexMaster.find(
+        //   (i) =>
+        //     i.token.toString() === config.tokenNumber &&
+        //     i.exchange === config.exchange,
         // );
 
-        const roundStep = isIndexToken ? 50 : 100; // round step for index tokens is 50 NSE, for others is 100
+        // // round step is 50 only for NIFTY, 100 for everything else (BANKNIFTY, SENSEX, non-index)
+        // const roundStep = matchedIndex?.symbol === 'NIFTY' ? 50 : 100;
+
+        // find (or auto-create) the specific index entry that matches this config's token+exchange
+        const matchedIndex = this.ensureIndexMasterEntry(config);
+
+        const roundStep = matchedIndex?.roundStep ?? 100; // fallback if entry couldn't be created
         //const roundStep = isIndexToken ? 100 : 100;
         // strike = this.roundStrike(strike, roundStep);
         strike =
@@ -189,6 +228,10 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
               )
             : this.roundStrike(strike, roundStep, 'nearest'); // ATM when otm is 0
 
+        // this.logger.debug(
+        //   `Leg ${leg.tradingSymbol} | mainLtp=${mainLtp} | otmPercent=${otmPercent} | diff=${diff} | strike=${strike}`,
+        // );
+
         const instrument = this.instrumentData.find(
           (inst) =>
             inst.exchange === leg.exch &&
@@ -196,14 +239,19 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
             inst.optionType === leg.optionType &&
             inst.expiry === leg.expiry &&
             inst.strikePrice === strike &&
-            inst.symbol ===
-              this.indexMaster.find(
-                (i) => i.token.toString() === config.tokenNumber,
-              )?.symbol, // Match symbol from index master
+            // inst.symbol ===
+            //   this.indexMaster.find(
+            //     (i) => i.token.toString() === config.tokenNumber,
+            //   )?.symbol, // Match symbol from index master
+            inst.symbol === matchedIndex?.symbol, // trying with this
           // inst.symbol === config.symbolName,
         );
 
         if (!instrument) continue;
+
+        // this.logger.debug(
+        //   `Leg ${leg.tradingSymbol} | Found instrument: ${instrument.tradingSymbol} | token=${instrument.token}`,
+        // );
 
         // leg.tokenNumber = String(instrument.token);
         // leg.tradingSymbol = instrument.tradingSymbol;
@@ -503,5 +551,65 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
       this.logger.error(`hasOpenPosition error`, error?.stack || error);
       return false;
     }
+  }
+
+  // =====================================================
+  // ENSURE INDEX MASTER HAS ENTRY FOR THIS CONFIG'S UNDERLYING
+  // =====================================================
+  private ensureIndexMasterEntry(
+    config: AutoStradleDataEntity,
+  ): IndexMasterEntry | undefined {
+    try {
+      if (!config.exchange || !config.tokenNumber || !config.symbolName) {
+        this.logger.warn(
+          `Cannot auto-register index master entry — missing exchange/tokenNumber/symbolName on config ${config._id}`,
+        );
+        return undefined;
+      }
+
+      const tokenNum = Number(config.tokenNumber);
+      if (Number.isNaN(tokenNum)) return undefined;
+
+      let existing = this.indexMaster.find(
+        (i) => i.token === tokenNum && i.exchange === config.exchange,
+      );
+
+      if (existing) return existing;
+
+      // Not found — auto-register a new entry from the config
+      const roundStep = this.inferRoundStep(config.symbolName);
+
+      existing = {
+        exchange: config.exchange,
+        symbol: config.symbolName,
+        token: tokenNum,
+        roundStep,
+      };
+
+      this.indexMaster.push(existing);
+
+      this.logger.log(
+        `Auto-registered new index master entry: ${JSON.stringify(existing)}`,
+      );
+
+      return existing;
+    } catch (error) {
+      this.logger.error(`ensureIndexMasterEntry error`, error?.stack || error);
+      return undefined;
+    }
+  }
+
+  // =====================================================
+  // INFER ROUND STEP FOR A NEW/UNKNOWN SYMBOL
+  // =====================================================
+  private inferRoundStep(symbolName: string): number {
+    const upper = (symbolName || '').toUpperCase().trim();
+
+    // exact-match known symbols first — avoids "BANKNIFTY" matching a loose NIFTY substring check
+    if (upper === 'NIFTY' || upper === 'NIFTY 50') return 50;
+    if (upper === 'FINNIFTY' || upper === 'MIDCPNIFTY') return 50;
+
+    // default for BANKNIFTY, SENSEX, and any other/unknown symbol
+    return 100;
   }
 }
