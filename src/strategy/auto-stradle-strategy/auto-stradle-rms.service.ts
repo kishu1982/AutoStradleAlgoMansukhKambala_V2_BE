@@ -19,6 +19,12 @@ export class AutoStradleRMSService implements OnModuleInit {
   private priceMap = new Map<string, MarketTick>();
   private exitLocks = new Set<string>();
 
+  // max order per second
+  private readonly MAX_ORDERS_PER_SECOND = 10;
+
+  private orderCounter = 0;
+  private windowStart = Date.now();
+
   private positionStability = new Map<
     string,
     { legs: Map<string, { netQty: number; stableSince: number }> }
@@ -1049,137 +1055,421 @@ loop ends only when BOTH zero
   */
 
   // ratio part for exit in batchs
+  // changing name to old just to make it not in use
+  // private async executeRatioCloseOld(config: any, reason: string) {
+  //   if (config.exitStatus !== 'EXITING') return;
+
+  //   const [legA, legB] = config.legsData;
+  //   if (!legA || !legB) return;
+
+  //   const MAX_ORDER_LOTS = 25;
+  //   // const STEP_LOTS = 1; // lots per leg per order while BOTH legs still open
+
+  //   // ⭐ scale loop budget with actual position size so large positions
+  //   // don't get cut off mid-exit by a fixed low ceiling
+  //   const approxTotalLots =
+  //     Number(legA.quantityLots || 0) + Number(legB.quantityLots || 0);
+  //   const MAX_LOOP = Math.max(50, approxTotalLots + 20);
+
+  //   let loopCount = 0;
+
+  //   while (true) {
+  //     loopCount++;
+
+  //     if (loopCount > MAX_LOOP) {
+  //       this.logger.error(`Exit max loop reached ${config._id}`);
+  //       break;
+  //     }
+
+  //     const netPositions = await this.exchangeDataService.getNetPositions();
+
+  //     const netA = this.getNetPositionQty(
+  //       netPositions,
+  //       legA.tokenNumber,
+  //       legA.exch,
+  //     );
+
+  //     const netB = this.getNetPositionQty(
+  //       netPositions,
+  //       legB.tokenNumber,
+  //       legB.exch,
+  //     );
+
+  //     // ======================
+  //     // EXIT COMPLETE
+  //     // ======================
+
+  //     if (netA === 0 && netB === 0) {
+  //       this.logger.warn(`Exit fully completed ${config._id}`);
+  //       break;
+  //     }
+
+  //     const lotSizeA = this.getLotSizeFromPosition(
+  //       netPositions,
+  //       legA.tokenNumber,
+  //       legA.exch,
+  //     );
+
+  //     const lotSizeB = this.getLotSizeFromPosition(
+  //       netPositions,
+  //       legB.tokenNumber,
+  //       legB.exch,
+  //     );
+
+  //     if (!lotSizeA || !lotSizeB) {
+  //       this.logger.error(`Lot size missing`);
+  //       break;
+  //     }
+
+  //     const remainingALots = Math.floor(Math.abs(netA) / lotSizeA);
+  //     const remainingBLots = Math.floor(Math.abs(netB) / lotSizeB);
+
+  //     // let exitLotsA = 0;
+  //     // let exitLotsB = 0;
+
+  //     // ======================
+  //     // FINAL CLEANUP MODE — only one leg still has qty
+  //     // ======================
+
+  //     // if (netA === 0 || netB === 0) {
+  //     //   this.logger.warn(`Final cleanup mode`);
+
+  //     //   // ⭐ cap even the single-leg cleanup, don't dump it all in one order
+  //     //   exitLotsA = Math.min(remainingALots, MAX_ORDER_LOTS);
+  //     //   exitLotsB = Math.min(remainingBLots, MAX_ORDER_LOTS);
+  //     // } else {
+  //     //   // ======================
+  //     //   // BOTH LEGS STILL OPEN — step down together, one lot per leg
+  //     //   // per order (mirrors entry-side execution logic)
+  //     //   // ======================
+
+  //     //   exitLotsA = Math.min(STEP_LOTS, remainingALots);
+  //     //   exitLotsB = Math.min(STEP_LOTS, remainingBLots);
+
+  //     //   this.logger.warn(`Stepped exit mode (1:1)`);
+  //     // }
+  //     const { exitLotsA, exitLotsB } = this.calculateExitBatch(
+  //       legA,
+  //       legB,
+  //       remainingALots,
+  //       remainingBLots,
+  //       netA,
+  //       netB,
+  //       MAX_ORDER_LOTS,
+  //       this.stepLots,
+  //     );
+
+  //     let qtyA = exitLotsA * lotSizeA;
+  //     let qtyB = exitLotsB * lotSizeB;
+
+  //     qtyA = Math.min(qtyA, Math.abs(netA));
+  //     qtyB = Math.min(qtyB, Math.abs(netB));
+
+  //     if (qtyA <= 0 && qtyB <= 0) {
+  //       this.logger.warn(`Nothing to exit — stopping`);
+  //       break;
+  //     }
+
+  //     this.logger.warn(
+  //       `Exit batch | netA=${netA} qtyA=${qtyA} | netB=${netB} qtyB=${qtyB}`,
+  //     );
+
+  //     // ==============================
+  //     // GET LIMIT PRICES FOR BOTH LEGS
+  //     // ==============================
+
+  //     const priceA =
+  //       qtyA > 0 ? this.getRmsLimitPrice(legA, netA, netPositions) : undefined;
+
+  //     const priceB =
+  //       qtyB > 0 ? this.getRmsLimitPrice(legB, netB, netPositions) : undefined;
+
+  //     // ==============================
+  //     // VALIDATE BOTH PRICES
+  //     // ==============================
+
+  //     const legAPriceMissing = qtyA > 0 && priceA === undefined;
+  //     const legBPriceMissing = qtyB > 0 && priceB === undefined;
+
+  //     if (legAPriceMissing || legBPriceMissing) {
+  //       if (legAPriceMissing) {
+  //         this.logger.error(`EXIT price missing LEG A ${legA.tradingSymbol}`);
+  //       }
+
+  //       if (legBPriceMissing) {
+  //         this.logger.error(`EXIT price missing LEG B ${legB.tradingSymbol}`);
+  //       }
+
+  //       this.logger.error(
+  //         `Both exit prices required. Skipping batch for ${config._id}`,
+  //       );
+
+  //       break; // DO NOT PLACE PARTIAL EXIT
+  //     }
+
+  //     // ==============================
+  //     // PLACE LIMIT EXIT ORDERS
+  //     // ==============================
+
+  //     await Promise.all([
+  //       qtyA > 0
+  //         ? this.ordersService.placeOrder({
+  //             buy_or_sell: netA > 0 ? 'S' : 'B',
+  //             product_type: config.productType === 'INTRADAY' ? 'I' : 'M',
+  //             exchange: legA.exch,
+  //             tradingsymbol: legA.tradingSymbol,
+  //             quantity: qtyA,
+  //             price_type: 'LMT',
+  //             price: priceA,
+  //             trigger_price: 0,
+  //             discloseqty: 0,
+  //             // retention: 'DAY',
+  //             retention: 'IOC',
+  //             amo: 'NO',
+  //             remarks: `AUTO STRADLE EXIT A (${reason})`,
+  //           })
+  //         : Promise.resolve(),
+
+  //       qtyB > 0
+  //         ? this.ordersService.placeOrder({
+  //             buy_or_sell: netB > 0 ? 'S' : 'B',
+  //             product_type: config.productType === 'INTRADAY' ? 'I' : 'M',
+  //             exchange: legB.exch,
+  //             tradingsymbol: legB.tradingSymbol,
+  //             quantity: qtyB,
+  //             price_type: 'LMT',
+  //             price: priceB,
+  //             trigger_price: 0,
+  //             discloseqty: 0,
+  //             // retention: 'DAY',
+  //             retention: 'IOC',
+  //             amo: 'NO',
+  //             remarks: `AUTO STRADLE EXIT B (${reason})`,
+  //           })
+  //         : Promise.resolve(),
+  //     ]);
+
+  //     const updated = await this.waitForPositionUpdate(
+  //       config,
+  //       legA,
+  //       legB,
+  //       netA,
+  //       netB,
+  //     );
+
+  //     if (!updated) {
+  //       this.logger.error(`Position not updated — stopping`);
+  //       break;
+  //     }
+  //   }
+  // }
+  /*
+  * flow 
+  Get positions ONCE
+
+↓
+
+Calculate remaining lots
+
+↓
+
+while(remaining lots)
+
+    create batch
+
+    fire Promise
+
+↓
+
+Promise.allSettled()
+
+↓
+
+sleep 2500ms
+
+↓
+
+Reconcile
+
+↓
+
+Topup
+  */
   private async executeRatioClose(config: any, reason: string) {
     if (config.exitStatus !== 'EXITING') return;
 
     const [legA, legB] = config.legsData;
     if (!legA || !legB) return;
 
-    const MAX_ORDER_LOTS = 25;
-    // const STEP_LOTS = 1; // lots per leg per order while BOTH legs still open
+    const netPositions = await this.exchangeDataService.getNetPositions();
 
-    // ⭐ scale loop budget with actual position size so large positions
-    // don't get cut off mid-exit by a fixed low ceiling
-    const approxTotalLots =
-      Number(legA.quantityLots || 0) + Number(legB.quantityLots || 0);
-    const MAX_LOOP = Math.max(50, approxTotalLots + 20);
+    const netA = this.getNetPositionQty(
+      netPositions,
+      legA.tokenNumber,
+      legA.exch,
+    );
 
-    let loopCount = 0;
+    const netB = this.getNetPositionQty(
+      netPositions,
+      legB.tokenNumber,
+      legB.exch,
+    );
 
-    while (true) {
-      loopCount++;
+    if (netA === 0 && netB === 0) {
+      this.logger.warn(`Already exited ${config._id}`);
+      return;
+    }
 
-      if (loopCount > MAX_LOOP) {
-        this.logger.error(`Exit max loop reached ${config._id}`);
-        break;
-      }
+    const lotSizeA = this.getLotSizeFromPosition(
+      netPositions,
+      legA.tokenNumber,
+      legA.exch,
+    );
 
-      const netPositions = await this.exchangeDataService.getNetPositions();
+    const lotSizeB = this.getLotSizeFromPosition(
+      netPositions,
+      legB.tokenNumber,
+      legB.exch,
+    );
 
-      const netA = this.getNetPositionQty(
-        netPositions,
-        legA.tokenNumber,
-        legA.exch,
-      );
+    let remainingALots = Math.floor(Math.abs(netA) / lotSizeA);
+    let remainingBLots = Math.floor(Math.abs(netB) / lotSizeB);
 
-      const netB = this.getNetPositionQty(
-        netPositions,
-        legB.tokenNumber,
-        legB.exch,
-      );
+    const firePromises: Promise<any>[] = [];
 
-      // ======================
-      // EXIT COMPLETE
-      // ======================
-
-      if (netA === 0 && netB === 0) {
-        this.logger.warn(`Exit fully completed ${config._id}`);
-        break;
-      }
-
-      const lotSizeA = this.getLotSizeFromPosition(
-        netPositions,
-        legA.tokenNumber,
-        legA.exch,
-      );
-
-      const lotSizeB = this.getLotSizeFromPosition(
-        netPositions,
-        legB.tokenNumber,
-        legB.exch,
-      );
-
-      if (!lotSizeA || !lotSizeB) {
-        this.logger.error(`Lot size missing`);
-        break;
-      }
-
-      const remainingALots = Math.floor(Math.abs(netA) / lotSizeA);
-      const remainingBLots = Math.floor(Math.abs(netB) / lotSizeB);
-
-      // let exitLotsA = 0;
-      // let exitLotsB = 0;
-
-      // ======================
-      // FINAL CLEANUP MODE — only one leg still has qty
-      // ======================
-
-      // if (netA === 0 || netB === 0) {
-      //   this.logger.warn(`Final cleanup mode`);
-
-      //   // ⭐ cap even the single-leg cleanup, don't dump it all in one order
-      //   exitLotsA = Math.min(remainingALots, MAX_ORDER_LOTS);
-      //   exitLotsB = Math.min(remainingBLots, MAX_ORDER_LOTS);
-      // } else {
-      //   // ======================
-      //   // BOTH LEGS STILL OPEN — step down together, one lot per leg
-      //   // per order (mirrors entry-side execution logic)
-      //   // ======================
-
-      //   exitLotsA = Math.min(STEP_LOTS, remainingALots);
-      //   exitLotsB = Math.min(STEP_LOTS, remainingBLots);
-
-      //   this.logger.warn(`Stepped exit mode (1:1)`);
-      // }
-      const { exitLotsA, exitLotsB } = this.calculateExitBatch(
+    while (remainingALots > 0 || remainingBLots > 0) {
+      const batch = this.calculateExitBatch(
         legA,
         legB,
         remainingALots,
         remainingBLots,
         netA,
         netB,
-        MAX_ORDER_LOTS,
+        25,
         this.stepLots,
       );
 
-      let qtyA = exitLotsA * lotSizeA;
-      let qtyB = exitLotsB * lotSizeB;
+      const qtyA = batch.exitLotsA * lotSizeA;
+      const qtyB = batch.exitLotsB * lotSizeB;
 
-      qtyA = Math.min(qtyA, Math.abs(netA));
-      qtyB = Math.min(qtyB, Math.abs(netB));
-
-      if (qtyA <= 0 && qtyB <= 0) {
-        this.logger.warn(`Nothing to exit — stopping`);
-        break;
-      }
-
-      this.logger.warn(
-        `Exit batch | netA=${netA} qtyA=${qtyA} | netB=${netB} qtyB=${qtyB}`,
+      firePromises.push(
+        this.placeExitBatchOrders(
+          config,
+          legA,
+          legB,
+          qtyA,
+          qtyB,
+          netA,
+          netB,
+          reason,
+        ),
       );
 
-      // ==============================
-      // GET LIMIT PRICES FOR BOTH LEGS
-      // ==============================
+      remainingALots -= batch.exitLotsA;
+      remainingBLots -= batch.exitLotsB;
 
-      const priceA =
-        qtyA > 0 ? this.getRmsLimitPrice(legA, netA, netPositions) : undefined;
+      await this.sleep(200);
+    }
 
-      const priceB =
-        qtyB > 0 ? this.getRmsLimitPrice(legB, netB, netPositions) : undefined;
+    await Promise.allSettled(firePromises);
 
-      // ==============================
-      // VALIDATE BOTH PRICES
-      // ==============================
+    await this.sleep(4000);
+
+    await this.reconcileExit(config, legA, legB, reason);
+  }
+
+  // reconcile part
+  private async reconcileExit(config, legA, legB, reason) {
+    const netPositions = await this.exchangeDataService.getNetPositions();
+
+    const netA = this.getNetPositionQty(
+      netPositions,
+      legA.tokenNumber,
+      legA.exch,
+    );
+
+    const netB = this.getNetPositionQty(
+      netPositions,
+      legB.tokenNumber,
+      legB.exch,
+    );
+
+    if (netA == 0 && netB == 0) {
+      this.logger.warn('Exit completed');
+
+      return;
+    }
+
+    const lotSizeA = this.getLotSizeFromPosition(
+      netPositions,
+      legA.tokenNumber,
+      legA.exch,
+    );
+
+    const lotSizeB = this.getLotSizeFromPosition(
+      netPositions,
+      legB.tokenNumber,
+      legB.exch,
+    );
+
+    const remainingALots = Math.floor(Math.abs(netA) / lotSizeA);
+
+    const remainingBLots = Math.floor(Math.abs(netB) / lotSizeB);
+
+    const batch = this.calculateExitBatch(
+      legA,
+      legB,
+      remainingALots,
+      remainingBLots,
+      netA,
+      netB,
+      25,
+      this.stepLots,
+    );
+
+    await this.placeExitBatchOrders(
+      config,
+      legA,
+      legB,
+      batch.exitLotsA * lotSizeA,
+      batch.exitLotsB * lotSizeB,
+      netA,
+      netB,
+      reason,
+    );
+  }
+
+  // new code of place exit batch orders
+  private async placeExitBatchOrders(
+    config: any,
+    legA: any,
+    legB: any,
+    qtyA: number,
+    qtyB: number,
+    netA: number,
+    netB: number,
+    reason: string,
+  ) {
+    try {
+      // ======================================
+      // GET EXIT LIMIT PRICES
+      // ======================================
+
+      const netPositions = await this.exchangeDataService.getNetPositions();
+
+      const [priceA, priceB] = await Promise.all([
+        qtyA > 0
+          ? Promise.resolve(this.getRmsLimitPrice(legA, netA, netPositions))
+          : Promise.resolve(undefined),
+
+        qtyB > 0
+          ? Promise.resolve(this.getRmsLimitPrice(legB, netB, netPositions))
+          : Promise.resolve(undefined),
+      ]);
+
+      // ======================================
+      // VALIDATE PRICES
+      // ======================================
 
       const legAPriceMissing = qtyA > 0 && priceA === undefined;
       const legBPriceMissing = qtyB > 0 && priceB === undefined;
@@ -1194,17 +1484,28 @@ loop ends only when BOTH zero
         }
 
         this.logger.error(
-          `Both exit prices required. Skipping batch for ${config._id}`,
+          `Skipping exit batch because one or more prices are unavailable.`,
         );
 
-        break; // DO NOT PLACE PARTIAL EXIT
+        return null;
       }
 
-      // ==============================
-      // PLACE LIMIT EXIT ORDERS
-      // ==============================
+      // ======================================
+      // 10 ORDERS / SECOND THROTTLE
+      // ======================================
 
-      await Promise.all([
+      let orderCount = 0;
+
+      if (qtyA > 0) orderCount++;
+      if (qtyB > 0) orderCount++;
+
+      await this.throttleOrders(orderCount);
+
+      // ======================================
+      // PLACE BOTH EXIT ORDERS
+      // ======================================
+
+      const [orderResA, orderResB] = await Promise.allSettled([
         qtyA > 0
           ? this.ordersService.placeOrder({
               buy_or_sell: netA > 0 ? 'S' : 'B',
@@ -1216,12 +1517,11 @@ loop ends only when BOTH zero
               price: priceA,
               trigger_price: 0,
               discloseqty: 0,
-              // retention: 'DAY',
               retention: 'IOC',
               amo: 'NO',
               remarks: `AUTO STRADLE EXIT A (${reason})`,
             })
-          : Promise.resolve(),
+          : Promise.resolve(undefined),
 
         qtyB > 0
           ? this.ordersService.placeOrder({
@@ -1234,29 +1534,29 @@ loop ends only when BOTH zero
               price: priceB,
               trigger_price: 0,
               discloseqty: 0,
-              // retention: 'DAY',
               retention: 'IOC',
               amo: 'NO',
               remarks: `AUTO STRADLE EXIT B (${reason})`,
             })
-          : Promise.resolve(),
+          : Promise.resolve(undefined),
       ]);
 
-      const updated = await this.waitForPositionUpdate(
-        config,
-        legA,
-        legB,
-        netA,
-        netB,
+      this.logger.debug(
+        `Exit batch results | A=${JSON.stringify(
+          orderResA,
+        )} | B=${JSON.stringify(orderResB)}`,
       );
 
-      if (!updated) {
-        this.logger.error(`Position not updated — stopping`);
-        break;
-      }
+      return {
+        orderResA,
+        orderResB,
+      };
+    } catch (err) {
+      this.logger.error('placeExitBatchOrders error', err?.stack || err);
+
+      return null;
     }
   }
-
   // private async executeRatioClose(config: any, reason: string) {
   //   if (config.exitStatus !== 'EXITING') return;
 
@@ -2180,5 +2480,39 @@ Place exit again
   // =====================================================
   private clearPositionStability(configId: string) {
     this.positionStability.delete(String(configId));
+  }
+
+  // comply the compliance of max order per second 10
+  private async throttleOrders(orderCount: number) {
+    const now = Date.now();
+
+    // reset every second
+    if (now - this.windowStart >= 1000) {
+      this.windowStart = now;
+      this.orderCounter = 0;
+    }
+
+    // if limit exceeded, wait for next second
+    if (this.orderCounter + orderCount > this.MAX_ORDERS_PER_SECOND) {
+      const wait = 1000 - (now - this.windowStart);
+
+      if (wait > 0) {
+        this.logger.log(
+          `Rate limit reached. Waiting ${wait} ms before placing more orders.`,
+        );
+
+        await this.sleep(wait);
+      }
+
+      this.windowStart = Date.now();
+      this.orderCounter = 0;
+    }
+
+    this.orderCounter += orderCount;
+  }
+
+  // sleep fucntions
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 }

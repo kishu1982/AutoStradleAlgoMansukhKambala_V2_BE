@@ -27,6 +27,11 @@ export class AutoStradleExecutionService implements OnModuleInit {
   // decouple size of ratio helpign veriables
   // private readonly STEP_LOTS = 1; // lots placed per leg, per order, while both legs still have pending qty
   private readonly MAX_LOTS_PER_ORDER = 10; // hard cap for a single order once only one leg is left pending
+  // max order per second
+  private readonly MAX_ORDERS_PER_SECOND = 10;
+
+  private orderCounter = 0;
+  private windowStart = Date.now();
 
   constructor(
     private readonly configService: ConfigService,
@@ -112,6 +117,7 @@ export class AutoStradleExecutionService implements OnModuleInit {
   // STRADLE EXECUTION
   // =====================================================
 
+  // new logic with quick trade and without check again and again
   private async executeStradle(config: any) {
     try {
       const [legA, legB] = config.legsData;
@@ -119,323 +125,527 @@ export class AutoStradleExecutionService implements OnModuleInit {
 
       const lotA = this.getLotSize(legA.tokenNumber, legA.exch);
       const lotB = this.getLotSize(legB.tokenNumber, legB.exch);
-
       const desiredALots = legA.quantityLots;
       const desiredBLots = legB.quantityLots;
-
       const sideMultiplierA = legA.side === 'BUY' ? 1 : -1;
       const sideMultiplierB = legB.side === 'BUY' ? 1 : -1;
 
-      let loopCount = 0;
-      // const MAX_LOOP = 10;
-      const MAX_LOOP = desiredALots + desiredBLots + 20; // generous safety buffer, scales with order size
+      // ---- PHASE 1: fire all batches fast, no per-batch position wait ----
+      let netPositions = await this.exchangeDataService.getNetPositions();
+      let netALots =
+        (this.getNetPositionQty(netPositions, legA.tokenNumber, legA.exch) *
+          sideMultiplierA) /
+        lotA;
+      let netBLots =
+        (this.getNetPositionQty(netPositions, legB.tokenNumber, legB.exch) *
+          sideMultiplierB) /
+        lotB;
 
-      while (true) {
-        loopCount++;
+      let remainingALots = Math.max(0, desiredALots - netALots);
+      let remainingBLots = Math.max(0, desiredBLots - netBLots);
 
-        if (loopCount > MAX_LOOP) {
-          this.logger.error('Max loop reached. Stopping execution.');
-          break;
-        }
+      const firePromises: Promise<any>[] = [];
 
-        // ==============================
-        // GET LATEST POSITIONS
-        // ==============================
-
-        const netPositions = await this.exchangeDataService.getNetPositions();
-
-        const netAUnits = this.getNetPositionQty(
-          netPositions,
-          legA.tokenNumber,
-          legA.exch,
-        );
-
-        const netBUnits = this.getNetPositionQty(
-          netPositions,
-          legB.tokenNumber,
-          legB.exch,
-        );
-
-        const netALots = (netAUnits * sideMultiplierA) / lotA;
-        const netBLots = (netBUnits * sideMultiplierB) / lotB;
-
-        const remainingALots = Math.max(0, desiredALots - netALots);
-
-        const remainingBLots = Math.max(0, desiredBLots - netBLots);
-
-        this.logger.log(
-          `Net lots A:${netALots} B:${netBLots} | Remaining A:${remainingALots} B:${remainingBLots}`,
-        );
-
-        // ==============================
-        // STOP IF DONE
-        // ==============================
-
-        if (remainingALots === 0 && remainingBLots === 0) {
-          this.logger.log('Target achieved. Exiting.');
-          break;
-        }
-
+      while (remainingALots > 0 || remainingBLots > 0) {
         const batch = this.calculateBatch(
           legA,
           legB,
           remainingALots,
           remainingBLots,
         );
-
         const qtyA = batch[legA.tokenNumber] * lotA;
         const qtyB = batch[legB.tokenNumber] * lotB;
+        if (qtyA <= 0 && qtyB <= 0) break;
 
-        if (qtyA <= 0 && qtyB <= 0) {
-          this.logger.warn('No quantity left to execute.');
-          break;
-        }
-
-        // ==============================
-        // GET LIMIT PRICES
-        // ==============================
-
-        const [priceA, priceB] = await Promise.all([
-          qtyA > 0
-            ? this.getLimitPrice(legA.exch, legA.tokenNumber, legA.side)
-            : Promise.resolve(undefined),
-
-          qtyB > 0
-            ? this.getLimitPrice(legB.exch, legB.tokenNumber, legB.side)
-            : Promise.resolve(undefined),
-        ]);
-
-        // ==============================
-        // VALIDATE BOTH LEG PRICES
-        // ==============================
-
-        const legAPriceMissing = qtyA > 0 && priceA === undefined;
-        const legBPriceMissing = qtyB > 0 && priceB === undefined;
-
-        if (legAPriceMissing || legBPriceMissing) {
-          if (legAPriceMissing) {
-            this.logger.error(
-              `Price not available for LEG A → ${legA.tradingSymbol} (${legA.tokenNumber})`,
-            );
-          }
-
-          if (legBPriceMissing) {
-            this.logger.error(
-              `Price not available for LEG B → ${legB.tradingSymbol} (${legB.tokenNumber})`,
-            );
-          }
-
-          this.logger.error(
-            'Both leg prices are required. Skipping order placement.',
-          );
-
-          break; // Exit loop safely
-        }
-        // ==============================
-        // PLACE LIMIT ORDERS
-        // ==============================
-
-        const [orderResA, orderResB] = await Promise.all([
-          qtyA > 0
-            ? this.ordersService.placeOrder({
-                buy_or_sell: legA.side === 'BUY' ? 'B' : 'S',
-                product_type: this.resolveProductType(config.productType),
-                exchange: legA.exch,
-                tradingsymbol: legA.tradingSymbol,
-                quantity: qtyA,
-                price_type: 'LMT',
-                price: priceA,
-                trigger_price: 0,
-                discloseqty: 0,
-                // retention: 'DAY',
-                retention: 'IOC', // placing ioc order for leg A to avoid pending orders in case of partial fill of leg B
-                amo: 'NO',
-                remarks: `AUTO STRADLE A`,
-              })
-            : Promise.resolve(undefined),
-
-          qtyB > 0
-            ? this.ordersService.placeOrder({
-                buy_or_sell: legB.side === 'BUY' ? 'B' : 'S',
-                product_type: this.resolveProductType(config.productType),
-                exchange: legB.exch,
-                tradingsymbol: legB.tradingSymbol,
-                quantity: qtyB,
-                price_type: 'LMT',
-                price: priceB,
-                trigger_price: 0,
-                discloseqty: 0,
-                // retention: 'DAY',
-                retention: 'IOC', // placing ioc order for leg B to avoid pending orders in case of partial fill of leg A
-                amo: 'NO',
-                remarks: `AUTO STRADLE B`,
-              })
-            : Promise.resolve(undefined),
-        ]);
-
-        this.logger.debug(
-          `Order placement response A: ${JSON.stringify(orderResA)} | B: ${JSON.stringify(orderResB)}`,
-        );
-
-        // ==============================
-        // WAIT FOR UPDATE
-        // ==============================
-
-        const changed = await this.waitForPositionUpdate(
+        // fire without awaiting position confirmation — just await price+placement
+        const placePromise = this.placeBatchOrders(
+          config,
           legA,
           legB,
-          netAUnits,
-          netBUnits,
-          8000,
+          qtyA,
+          qtyB,
         );
+        firePromises.push(placePromise);
 
-        if (!changed) {
-          // ⭐ Log remaining lots so it's clear from logs alone how much
-          // was actually left unfilled when the loop stopped early
-          this.logger.error(
-            `Position did not update. Stopping to prevent duplicate execution. ` +
-              `Remaining A=${remainingALots} B=${remainingBLots} (config=${config._id})`,
-          );
-          break;
-        }
+        remainingALots -= batch[legA.tokenNumber];
+        remainingBLots -= batch[legB.tokenNumber];
 
-        // ==============================
-        // CHECK REJECTIONS — only for orders from THIS batch, not any
-        // rejection in a rolling window (which could belong to a
-        // different, unrelated order and wrongly abort the whole run)
-        // ==============================
-
-        const latestOrders = await this.exchangeDataService.getOrders();
-
-        const thisBatchRejected = this.hasThisOrderRejected(
-          latestOrders,
-          orderResA,
-          orderResB,
-        );
-
-        if (thisBatchRejected) {
-          this.logger.error(
-            `This batch's order was rejected. Stopping execution. ` +
-              `Remaining A=${remainingALots} B=${remainingBLots} (config=${config._id})`,
-          );
-          break;
-        }
-        // // ==============================
-        // // PLACE LIMIT ORDERS
-        // // ==============================
-
-        // await Promise.all([
-        //   qtyA > 0
-        //     ? this.ordersService.placeOrder({
-        //         buy_or_sell: legA.side === 'BUY' ? 'B' : 'S',
-        //         product_type: this.resolveProductType(config.productType),
-        //         exchange: legA.exch,
-        //         tradingsymbol: legA.tradingSymbol,
-        //         quantity: qtyA,
-        //         price_type: 'LMT',
-        //         price: priceA,
-        //         trigger_price: 0,
-        //         discloseqty: 0,
-        //         retention: 'DAY',
-        //         amo: 'NO',
-        //         remarks: `AUTO STRADLE A`,
-        //       })
-        //     : Promise.resolve(),
-
-        //   qtyB > 0
-        //     ? this.ordersService.placeOrder({
-        //         buy_or_sell: legB.side === 'BUY' ? 'B' : 'S',
-        //         product_type: this.resolveProductType(config.productType),
-        //         exchange: legB.exch,
-        //         tradingsymbol: legB.tradingSymbol,
-        //         quantity: qtyB,
-        //         price_type: 'LMT',
-        //         price: priceB,
-        //         trigger_price: 0,
-        //         discloseqty: 0,
-        //         retention: 'DAY',
-        //         amo: 'NO',
-        //         remarks: `AUTO STRADLE B`,
-        //       })
-        //     : Promise.resolve(),
-        // ]);
-
-        // // // ==============================
-        // // // PLACE ORDERS
-        // // // ==============================
-
-        // // await Promise.all([
-        // //   qtyA > 0
-        // //     ? this.ordersService.placeOrder({
-        // //         buy_or_sell: legA.side === 'BUY' ? 'B' : 'S',
-        // //         product_type: this.resolveProductType(config.productType),
-        // //         exchange: legA.exch,
-        // //         tradingsymbol: legA.tradingSymbol,
-        // //         quantity: qtyA,
-        // //         price_type: 'MKT',
-        // //         price: 0,
-        // //         trigger_price: 0,
-        // //         discloseqty: 0,
-        // //         retention: 'DAY',
-        // //         amo: 'NO',
-        // //         remarks: `AUTO STRADLE A`,
-        // //       })
-        // //     : Promise.resolve(),
-
-        // //   qtyB > 0
-        // //     ? this.ordersService.placeOrder({
-        // //         buy_or_sell: legB.side === 'BUY' ? 'B' : 'S',
-        // //         product_type: this.resolveProductType(config.productType),
-        // //         exchange: legB.exch,
-        // //         tradingsymbol: legB.tradingSymbol,
-        // //         quantity: qtyB,
-        // //         price_type: 'MKT',
-        // //         price: 0,
-        // //         trigger_price: 0,
-        // //         discloseqty: 0,
-        // //         retention: 'DAY',
-        // //         amo: 'NO',
-        // //         remarks: `AUTO STRADLE B`,
-        // //       })
-        // //     : Promise.resolve(),
-        // // ]);
-
-        // // ==============================
-        // // WAIT FOR UPDATE
-        // // ==============================
-
-        // const changed = await this.waitForPositionUpdate(
-        //   legA,
-        //   legB,
-        //   netAUnits,
-        //   netBUnits,
-        //   8000,
-        // );
-
-        // if (!changed) {
-        //   this.logger.error(
-        //     'Position did not update. Stopping to prevent duplicate execution.',
-        //   );
-        //   break;
-        // }
-
-        // // ==============================
-        // // CHECK REJECTIONS
-        // // ==============================
-
-        // const latestOrders = await this.exchangeDataService.getOrders();
-
-        // if (this.hasRecentRejection(latestOrders, legA, legB, 60)) {
-        //   this.logger.error(
-        //     'Recent rejection detected (within 1 minute). Stopping execution.',
-        //   );
-        //   break;
-        // }
+        await this.sleep(200); // small stagger for broker API, NOT a position poll
       }
+
+      await Promise.allSettled(firePromises);
+
+      // ---- PHASE 2: reconcile once, top up any gap ----
+      await this.sleep(4000); // let broker/exchange settle order state
+      await this.reconcileAndTopUp(
+        config,
+        legA,
+        legB,
+        lotA,
+        lotB,
+        sideMultiplierA,
+        sideMultiplierB,
+        desiredALots,
+        desiredBLots,
+      );
     } catch (err) {
       this.logger.error('executeStradle error', err?.stack || err);
     }
   }
+
+  private async placeBatchOrders(
+    config: any,
+    legA: any,
+    legB: any,
+    qtyA: number,
+    qtyB: number,
+  ) {
+    try {
+      const [priceA, priceB] = await Promise.all([
+        qtyA > 0
+          ? this.getLimitPrice(legA.exch, legA.tokenNumber, legA.side)
+          : Promise.resolve(undefined),
+        qtyB > 0
+          ? this.getLimitPrice(legB.exch, legB.tokenNumber, legB.side)
+          : Promise.resolve(undefined),
+      ]);
+
+      const legAPriceMissing = qtyA > 0 && priceA === undefined;
+      const legBPriceMissing = qtyB > 0 && priceB === undefined;
+
+      if (legAPriceMissing || legBPriceMissing) {
+        if (legAPriceMissing) {
+          this.logger.error(
+            `Price not available for LEG A → ${legA.tradingSymbol} (${legA.tokenNumber})`,
+          );
+        }
+        if (legBPriceMissing) {
+          this.logger.error(
+            `Price not available for LEG B → ${legB.tradingSymbol} (${legB.tokenNumber})`,
+          );
+        }
+        this.logger.error('Both leg prices are required. Skipping this batch.');
+        return null;
+      }
+      // to slow down if 10 order per second reached
+      let orderCount = 0;
+
+      if (qtyA > 0) orderCount++;
+      if (qtyB > 0) orderCount++;
+
+      await this.throttleOrders(orderCount);
+      // now place order
+      const [orderResA, orderResB] = await Promise.allSettled([
+        qtyA > 0
+          ? this.ordersService.placeOrder({
+              buy_or_sell: legA.side === 'BUY' ? 'B' : 'S',
+              product_type: this.resolveProductType(config.productType),
+              exchange: legA.exch,
+              tradingsymbol: legA.tradingSymbol,
+              quantity: qtyA,
+              price_type: 'LMT',
+              price: priceA,
+              trigger_price: 0,
+              discloseqty: 0,
+              retention: 'IOC',
+              amo: 'NO',
+              remarks: `AUTO STRADLE A`,
+            })
+          : Promise.resolve(undefined),
+
+        qtyB > 0
+          ? this.ordersService.placeOrder({
+              buy_or_sell: legB.side === 'BUY' ? 'B' : 'S',
+              product_type: this.resolveProductType(config.productType),
+              exchange: legB.exch,
+              tradingsymbol: legB.tradingSymbol,
+              quantity: qtyB,
+              price_type: 'LMT',
+              price: priceB,
+              trigger_price: 0,
+              discloseqty: 0,
+              retention: 'IOC',
+              amo: 'NO',
+              remarks: `AUTO STRADLE B`,
+            })
+          : Promise.resolve(undefined),
+      ]);
+
+      this.logger.debug(
+        `Batch order results A: ${JSON.stringify(orderResA)} | B: ${JSON.stringify(orderResB)}`,
+      );
+
+      return { orderResA, orderResB };
+    } catch (err) {
+      this.logger.error('placeBatchOrders error', err?.stack || err);
+      return null;
+    }
+  }
+  private async reconcileAndTopUp(
+    config,
+    legA,
+    legB,
+    lotA,
+    lotB,
+    sideMultiplierA,
+    sideMultiplierB,
+    desiredALots,
+    desiredBLots,
+  ) {
+    const netPositions = await this.exchangeDataService.getNetPositions();
+    const netALots =
+      (this.getNetPositionQty(netPositions, legA.tokenNumber, legA.exch) *
+        sideMultiplierA) /
+      lotA;
+    const netBLots =
+      (this.getNetPositionQty(netPositions, legB.tokenNumber, legB.exch) *
+        sideMultiplierB) /
+      lotB;
+
+    const gapA = Math.max(0, desiredALots - netALots);
+    const gapB = Math.max(0, desiredBLots - netBLots);
+
+    if (gapA === 0 && gapB === 0) {
+      this.logger.log('Target achieved after fast-fire phase.');
+      return;
+    }
+
+    this.logger.warn(
+      `Gap after fast-fire: A=${gapA} B=${gapB}. Placing top-up order.`,
+    );
+
+    const qtyA = gapA * lotA;
+    const qtyB = gapB * lotB;
+    await this.placeBatchOrders(config, legA, legB, qtyA, qtyB);
+
+    // Optional: one more short wait + one more reconcile check if you want a safety net,
+    // but this should now be rare (only rejections/partial fills), not the common case.
+  }
+  // old working perfect with loop on every check
+  // private async executeStradle(config: any) {
+  //   try {
+  //     const [legA, legB] = config.legsData;
+  //     if (!legA || !legB) return;
+
+  //     const lotA = this.getLotSize(legA.tokenNumber, legA.exch);
+  //     const lotB = this.getLotSize(legB.tokenNumber, legB.exch);
+
+  //     const desiredALots = legA.quantityLots;
+  //     const desiredBLots = legB.quantityLots;
+
+  //     const sideMultiplierA = legA.side === 'BUY' ? 1 : -1;
+  //     const sideMultiplierB = legB.side === 'BUY' ? 1 : -1;
+
+  //     let loopCount = 0;
+  //     // const MAX_LOOP = 10;
+  //     const MAX_LOOP = desiredALots + desiredBLots + 20; // generous safety buffer, scales with order size
+
+  //     while (true) {
+  //       loopCount++;
+
+  //       if (loopCount > MAX_LOOP) {
+  //         this.logger.error('Max loop reached. Stopping execution.');
+  //         break;
+  //       }
+
+  //       // ==============================
+  //       // GET LATEST POSITIONS
+  //       // ==============================
+
+  //       const netPositions = await this.exchangeDataService.getNetPositions();
+
+  //       const netAUnits = this.getNetPositionQty(
+  //         netPositions,
+  //         legA.tokenNumber,
+  //         legA.exch,
+  //       );
+
+  //       const netBUnits = this.getNetPositionQty(
+  //         netPositions,
+  //         legB.tokenNumber,
+  //         legB.exch,
+  //       );
+
+  //       const netALots = (netAUnits * sideMultiplierA) / lotA;
+  //       const netBLots = (netBUnits * sideMultiplierB) / lotB;
+
+  //       const remainingALots = Math.max(0, desiredALots - netALots);
+
+  //       const remainingBLots = Math.max(0, desiredBLots - netBLots);
+
+  //       this.logger.log(
+  //         `Net lots A:${netALots} B:${netBLots} | Remaining A:${remainingALots} B:${remainingBLots}`,
+  //       );
+
+  //       // ==============================
+  //       // STOP IF DONE
+  //       // ==============================
+
+  //       if (remainingALots === 0 && remainingBLots === 0) {
+  //         this.logger.log('Target achieved. Exiting.');
+  //         break;
+  //       }
+
+  //       const batch = this.calculateBatch(
+  //         legA,
+  //         legB,
+  //         remainingALots,
+  //         remainingBLots,
+  //       );
+
+  //       const qtyA = batch[legA.tokenNumber] * lotA;
+  //       const qtyB = batch[legB.tokenNumber] * lotB;
+
+  //       if (qtyA <= 0 && qtyB <= 0) {
+  //         this.logger.warn('No quantity left to execute.');
+  //         break;
+  //       }
+
+  //       // ==============================
+  //       // GET LIMIT PRICES
+  //       // ==============================
+
+  //       const [priceA, priceB] = await Promise.all([
+  //         qtyA > 0
+  //           ? this.getLimitPrice(legA.exch, legA.tokenNumber, legA.side)
+  //           : Promise.resolve(undefined),
+
+  //         qtyB > 0
+  //           ? this.getLimitPrice(legB.exch, legB.tokenNumber, legB.side)
+  //           : Promise.resolve(undefined),
+  //       ]);
+
+  //       // ==============================
+  //       // VALIDATE BOTH LEG PRICES
+  //       // ==============================
+
+  //       const legAPriceMissing = qtyA > 0 && priceA === undefined;
+  //       const legBPriceMissing = qtyB > 0 && priceB === undefined;
+
+  //       if (legAPriceMissing || legBPriceMissing) {
+  //         if (legAPriceMissing) {
+  //           this.logger.error(
+  //             `Price not available for LEG A → ${legA.tradingSymbol} (${legA.tokenNumber})`,
+  //           );
+  //         }
+
+  //         if (legBPriceMissing) {
+  //           this.logger.error(
+  //             `Price not available for LEG B → ${legB.tradingSymbol} (${legB.tokenNumber})`,
+  //           );
+  //         }
+
+  //         this.logger.error(
+  //           'Both leg prices are required. Skipping order placement.',
+  //         );
+
+  //         break; // Exit loop safely
+  //       }
+  //       // ==============================
+  //       // PLACE LIMIT ORDERS
+  //       // ==============================
+
+  //       const [orderResA, orderResB] = await Promise.all([
+  //         qtyA > 0
+  //           ? this.ordersService.placeOrder({
+  //               buy_or_sell: legA.side === 'BUY' ? 'B' : 'S',
+  //               product_type: this.resolveProductType(config.productType),
+  //               exchange: legA.exch,
+  //               tradingsymbol: legA.tradingSymbol,
+  //               quantity: qtyA,
+  //               price_type: 'LMT',
+  //               price: priceA,
+  //               trigger_price: 0,
+  //               discloseqty: 0,
+  //               // retention: 'DAY',
+  //               retention: 'IOC', // placing ioc order for leg A to avoid pending orders in case of partial fill of leg B
+  //               amo: 'NO',
+  //               remarks: `AUTO STRADLE A`,
+  //             })
+  //           : Promise.resolve(undefined),
+
+  //         qtyB > 0
+  //           ? this.ordersService.placeOrder({
+  //               buy_or_sell: legB.side === 'BUY' ? 'B' : 'S',
+  //               product_type: this.resolveProductType(config.productType),
+  //               exchange: legB.exch,
+  //               tradingsymbol: legB.tradingSymbol,
+  //               quantity: qtyB,
+  //               price_type: 'LMT',
+  //               price: priceB,
+  //               trigger_price: 0,
+  //               discloseqty: 0,
+  //               // retention: 'DAY',
+  //               retention: 'IOC', // placing ioc order for leg B to avoid pending orders in case of partial fill of leg A
+  //               amo: 'NO',
+  //               remarks: `AUTO STRADLE B`,
+  //             })
+  //           : Promise.resolve(undefined),
+  //       ]);
+
+  //       this.logger.debug(
+  //         `Order placement response A: ${JSON.stringify(orderResA)} | B: ${JSON.stringify(orderResB)}`,
+  //       );
+
+  //       // ==============================
+  //       // WAIT FOR UPDATE
+  //       // ==============================
+
+  //       const changed = await this.waitForPositionUpdate(
+  //         legA,
+  //         legB,
+  //         netAUnits,
+  //         netBUnits,
+  //         8000,
+  //       );
+
+  //       if (!changed) {
+  //         // ⭐ Log remaining lots so it's clear from logs alone how much
+  //         // was actually left unfilled when the loop stopped early
+  //         this.logger.error(
+  //           `Position did not update. Stopping to prevent duplicate execution. ` +
+  //             `Remaining A=${remainingALots} B=${remainingBLots} (config=${config._id})`,
+  //         );
+  //         break;
+  //       }
+
+  //       // ==============================
+  //       // CHECK REJECTIONS — only for orders from THIS batch, not any
+  //       // rejection in a rolling window (which could belong to a
+  //       // different, unrelated order and wrongly abort the whole run)
+  //       // ==============================
+
+  //       const latestOrders = await this.exchangeDataService.getOrders();
+
+  //       const thisBatchRejected = this.hasThisOrderRejected(
+  //         latestOrders,
+  //         orderResA,
+  //         orderResB,
+  //       );
+
+  //       if (thisBatchRejected) {
+  //         this.logger.error(
+  //           `This batch's order was rejected. Stopping execution. ` +
+  //             `Remaining A=${remainingALots} B=${remainingBLots} (config=${config._id})`,
+  //         );
+  //         break;
+  //       }
+  //       // // ==============================
+  //       // // PLACE LIMIT ORDERS
+  //       // // ==============================
+
+  //       // await Promise.all([
+  //       //   qtyA > 0
+  //       //     ? this.ordersService.placeOrder({
+  //       //         buy_or_sell: legA.side === 'BUY' ? 'B' : 'S',
+  //       //         product_type: this.resolveProductType(config.productType),
+  //       //         exchange: legA.exch,
+  //       //         tradingsymbol: legA.tradingSymbol,
+  //       //         quantity: qtyA,
+  //       //         price_type: 'LMT',
+  //       //         price: priceA,
+  //       //         trigger_price: 0,
+  //       //         discloseqty: 0,
+  //       //         retention: 'DAY',
+  //       //         amo: 'NO',
+  //       //         remarks: `AUTO STRADLE A`,
+  //       //       })
+  //       //     : Promise.resolve(),
+
+  //       //   qtyB > 0
+  //       //     ? this.ordersService.placeOrder({
+  //       //         buy_or_sell: legB.side === 'BUY' ? 'B' : 'S',
+  //       //         product_type: this.resolveProductType(config.productType),
+  //       //         exchange: legB.exch,
+  //       //         tradingsymbol: legB.tradingSymbol,
+  //       //         quantity: qtyB,
+  //       //         price_type: 'LMT',
+  //       //         price: priceB,
+  //       //         trigger_price: 0,
+  //       //         discloseqty: 0,
+  //       //         retention: 'DAY',
+  //       //         amo: 'NO',
+  //       //         remarks: `AUTO STRADLE B`,
+  //       //       })
+  //       //     : Promise.resolve(),
+  //       // ]);
+
+  //       // // // ==============================
+  //       // // // PLACE ORDERS
+  //       // // // ==============================
+
+  //       // // await Promise.all([
+  //       // //   qtyA > 0
+  //       // //     ? this.ordersService.placeOrder({
+  //       // //         buy_or_sell: legA.side === 'BUY' ? 'B' : 'S',
+  //       // //         product_type: this.resolveProductType(config.productType),
+  //       // //         exchange: legA.exch,
+  //       // //         tradingsymbol: legA.tradingSymbol,
+  //       // //         quantity: qtyA,
+  //       // //         price_type: 'MKT',
+  //       // //         price: 0,
+  //       // //         trigger_price: 0,
+  //       // //         discloseqty: 0,
+  //       // //         retention: 'DAY',
+  //       // //         amo: 'NO',
+  //       // //         remarks: `AUTO STRADLE A`,
+  //       // //       })
+  //       // //     : Promise.resolve(),
+
+  //       // //   qtyB > 0
+  //       // //     ? this.ordersService.placeOrder({
+  //       // //         buy_or_sell: legB.side === 'BUY' ? 'B' : 'S',
+  //       // //         product_type: this.resolveProductType(config.productType),
+  //       // //         exchange: legB.exch,
+  //       // //         tradingsymbol: legB.tradingSymbol,
+  //       // //         quantity: qtyB,
+  //       // //         price_type: 'MKT',
+  //       // //         price: 0,
+  //       // //         trigger_price: 0,
+  //       // //         discloseqty: 0,
+  //       // //         retention: 'DAY',
+  //       // //         amo: 'NO',
+  //       // //         remarks: `AUTO STRADLE B`,
+  //       // //       })
+  //       // //     : Promise.resolve(),
+  //       // // ]);
+
+  //       // // ==============================
+  //       // // WAIT FOR UPDATE
+  //       // // ==============================
+
+  //       // const changed = await this.waitForPositionUpdate(
+  //       //   legA,
+  //       //   legB,
+  //       //   netAUnits,
+  //       //   netBUnits,
+  //       //   8000,
+  //       // );
+
+  //       // if (!changed) {
+  //       //   this.logger.error(
+  //       //     'Position did not update. Stopping to prevent duplicate execution.',
+  //       //   );
+  //       //   break;
+  //       // }
+
+  //       // // ==============================
+  //       // // CHECK REJECTIONS
+  //       // // ==============================
+
+  //       // const latestOrders = await this.exchangeDataService.getOrders();
+
+  //       // if (this.hasRecentRejection(latestOrders, legA, legB, 60)) {
+  //       //   this.logger.error(
+  //       //     'Recent rejection detected (within 1 minute). Stopping execution.',
+  //       //   );
+  //       //   break;
+  //       // }
+  //     }
+  //   } catch (err) {
+  //     this.logger.error('executeStradle error', err?.stack || err);
+  //   }
+  // }
 
   // =====================================================
   // HELPERS
@@ -1098,5 +1308,34 @@ export class AutoStradleExecutionService implements OnModuleInit {
       this.logger.error('hasThisOrderRejected error', err?.stack || err);
       return false;
     }
+  }
+
+  // comply the compliance of max order per second 10
+  private async throttleOrders(orderCount: number) {
+    const now = Date.now();
+
+    // reset every second
+    if (now - this.windowStart >= 1000) {
+      this.windowStart = now;
+      this.orderCounter = 0;
+    }
+
+    // if limit exceeded, wait for next second
+    if (this.orderCounter + orderCount > this.MAX_ORDERS_PER_SECOND) {
+      const wait = 1000 - (now - this.windowStart);
+
+      if (wait > 0) {
+        this.logger.log(
+          `Rate limit reached. Waiting ${wait} ms before placing more orders.`,
+        );
+
+        await this.sleep(wait);
+      }
+
+      this.windowStart = Date.now();
+      this.orderCounter = 0;
+    }
+
+    this.orderCounter += orderCount;
   }
 }
