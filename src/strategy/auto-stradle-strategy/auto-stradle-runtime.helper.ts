@@ -328,7 +328,7 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
               : (legTick.bp1 ?? legTick.lp ?? undefined);
         }
         // temporarily changing
-        // isUpdated = true;
+        isUpdated = true;
       }
 
       if (isUpdated) {
