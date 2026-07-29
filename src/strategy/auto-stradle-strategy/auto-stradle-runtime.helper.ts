@@ -327,8 +327,8 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
               ? (legTick.sp1 ?? legTick.lp ?? undefined)
               : (legTick.bp1 ?? legTick.lp ?? undefined);
         }
-
-        isUpdated = true;
+        // temporarily changing
+        // isUpdated = true;
       }
 
       if (isUpdated) {
@@ -337,7 +337,9 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
         // );
         await this.autoStradleService.update(
           config._id.toString(),
-          config as any,
+          // config as any,
+          { ltp: config.ltp, legsData: config.legsData } as any, // (from your earlier fix)
+          'CRON', // ⭐ NEW — tag this as cron-originated so it respects the lock
         );
       }
     } catch (error) {

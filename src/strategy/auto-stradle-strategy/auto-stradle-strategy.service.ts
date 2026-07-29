@@ -200,8 +200,22 @@ export class AutoStradleStrategyService {
   async update(
     id: string,
     dto: UpdateAutoStradleStrategyDto,
+    source: 'API' | 'CRON' = 'API', // ⭐ NEW — default 'API' so controller calls need no change
   ): Promise<AutoStradleDataEntity> {
-    const MAX_RETRIES = 4;
+    // ⭐ NEW — cron writers back off entirely if an API update is in flight
+    if (source === 'CRON' && this.isConfigLocked(id)) {
+      this.logger.debug(
+        `[UPDATE] Skipped CRON update for ID ${id} — locked by a recent API update`,
+      );
+      return this.findById(id);
+    }
+
+    // ⭐ NEW — API updates claim the lock for the duration of this call
+    if (source === 'API') {
+      this.lockConfig(id, this.API_LOCK_DURATION_MS);
+    }
+
+    const MAX_RETRIES = 2;
     let attempt = 0;
     // let latestConfig: AutoStradleDataEntity;
     let latestConfig: AutoStradleDataEntity = await this.findById(id); // ✅ initialized here
@@ -243,6 +257,19 @@ export class AutoStradleStrategyService {
 
         // Always fetch fresh — a cron job may have written since our last read
         const config = await this.findById(id);
+
+        // ⭐ NEW: if legsData was provided, merge structural fields onto the
+        // CURRENT DB leg data, preserving cron-owned computed fields
+        let effectiveProvidedFields = providedFields;
+        if (providedFields.legsData) {
+          effectiveProvidedFields = {
+            ...providedFields,
+            legsData: this.mergeLegsData(
+              providedFields.legsData,
+              config.legsData,
+            ),
+          };
+        }
 
         // Duplicate main-signal check — only if any of those fields were sent,
         // and only meaningful on the first attempt
@@ -302,8 +329,18 @@ export class AutoStradleStrategyService {
         // Only verify the fields we actually intended to change — comparing
         // the whole document would false-fail if a cron job touched an
         // unrelated field (e.g. ltp) between our save and this read
+        // verified = providedKeys.every((key) =>
+        //   this.isDeepEqual((verifyConfig as any)[key], providedFields[key]),
+        // );
+
+        // Verify against the MERGED expected values, not the raw incoming
+        // payload — the merge is intentional, so comparing against the raw
+        // computed fields would always mismatch
         verified = providedKeys.every((key) =>
-          this.isDeepEqual((verifyConfig as any)[key], providedFields[key]),
+          this.isDeepEqual(
+            (verifyConfig as any)[key],
+            effectiveProvidedFields[key],
+          ),
         );
 
         if (verified) {
@@ -638,5 +675,67 @@ export class AutoStradleStrategyService {
         dto.peAmountMultiplier ?? current.peAmountMultiplier ?? 1,
       exitRatio: dto.exitRatio ?? current.exitRatio ?? 1.75,
     };
+  }
+  /**
+   * Fields inside each leg that are live-computed by the tick-driven cron
+   * (AutoStradleRuntimeHelper) and must NEVER be settable via this API —
+   * regardless of what a stale frontend payload echoes back.
+   */
+  private readonly LEG_COMPUTED_FIELDS = [
+    'tokenNumber',
+    'tradingSymbol',
+    'legLtp',
+    'quantityLots',
+    'ratio',
+  ] as const;
+
+  /**
+   * Merges an incoming legsData array onto the CURRENT (fresh) DB legsData.
+   * Structural fields (exch/instrument/optionType/expiry/side) come from the
+   * incoming payload — the user can edit these. Computed fields always come
+   * from the current DB record — the cron owns these exclusively.
+   *
+   * Matches legs by index; assumes leg order/count is stable (already
+   * enforced elsewhere via validateLegsCount).
+   */
+  private mergeLegsData(incomingLegs: any[], currentLegs: any[]): any[] {
+    return incomingLegs.map((incomingLeg, idx) => {
+      const currentLeg = currentLegs?.[idx] || {};
+      const merged: any = { ...incomingLeg };
+
+      for (const field of this.LEG_COMPUTED_FIELDS) {
+        merged[field] = currentLeg[field] ?? null;
+      }
+
+      return merged;
+    });
+  }
+
+  /**
+   * Per-config lock: while a config's ID is present here with a future
+   * unlockAt timestamp, cron-originated writes (source === 'CRON') are
+   * skipped for that config. This gives explicit API updates a clear
+   * window to persist without racing the tick-driven cron.
+   */
+  private readonly configLocks = new Map<string, number>(); // id -> unlockAt (ms epoch)
+
+  private readonly API_LOCK_DURATION_MS = 1000; // block cron writes for 1s after an API update starts
+
+  private isConfigLocked(id: string): boolean {
+    const unlockAt = this.configLocks.get(id);
+    if (unlockAt === undefined) return false;
+    if (Date.now() >= unlockAt) {
+      this.configLocks.delete(id); // expired — clean up
+      return false;
+    }
+    return true;
+  }
+
+  private lockConfig(id: string, durationMs: number): void {
+    this.configLocks.set(id, Date.now() + durationMs);
+  }
+
+  private unlockConfig(id: string): void {
+    this.configLocks.delete(id);
   }
 }
