@@ -8,6 +8,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { AutoStradleRMSService } from './auto-stradle-rms.service';
 import { ExchangeDataService } from '../exchange-data/exchange-data.service';
+import { ConfigService } from '@nestjs/config';
 
 // making it dynamic
 interface IndexMasterEntry {
@@ -49,6 +50,7 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
     private readonly autoStradleService: AutoStradleStrategyService,
     private readonly rmsService: AutoStradleRMSService,
     private readonly exchangeDataService: ExchangeDataService, // ⭐ ADD
+    private readonly configService: ConfigService, // for getting value of env like max lot cap
   ) {}
 
   // =====================================================
@@ -61,6 +63,18 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
     } catch (error) {
       this.logger.error(`onModuleInit error`, error?.stack || error);
     }
+  }
+
+  // =====================================================
+  // Fetch max cap of lots value
+  // =====================================================
+  private getMaxLotPerLegAllowed(): number {
+    const raw = this.configService.get<string>('MAX_LOT_PER_LEG_ALLOWED', '0');
+    const val = Number(raw);
+    this.logger.debug(
+      `MAX_LOT_PER_LEG_ALLOWED =======>> raw="${raw}" parsed=${val}`,
+    ); // ⭐ TEMP
+    return Number.isNaN(val) ? 0 : val;
   }
 
   // =====================================================
@@ -164,61 +178,40 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
       const mainKey = `${config.exchange}|${config.tokenNumber}`;
       const mainTick = this.marketDataMap.get(mainKey);
 
-      // this.logger.debug(
-      //   `Main LTP for ${config.strategyName}: Symbol/token ${mainKey} ${mainTick?.lp} and updated Main LTP in config: ${config.ltp}`,
-      // );
-
       if (!mainTick?.lp) return;
 
       const mainLtp = mainTick.lp;
       config.ltp = mainLtp;
 
-      // this.logger.debug(
-      //   `Main LTP for ${config.strategyName}: Symbol/token ${mainKey} ${mainTick?.lp} and updated Main LTP in config: ${config.ltp}`,
-      // );
-
       let isUpdated = false;
+
+      // =====================================================
+      // PHASE 1 — resolve strike/instrument/raw qty per leg
+      // (no mutation yet — needed so we can compare across legs
+      // before deciding on the cap adjustment)
+      // =====================================================
+      interface LegComputation {
+        leg: any;
+        instrument: InstrumentInfo;
+        isPositionOpen: boolean;
+        newToken: string;
+        newSymbol: string;
+        legLtpForCalc?: number; // leg.legLtp as it stood BEFORE this tick's update
+        rawQty?: number;
+      }
+
+      const computations: LegComputation[] = [];
 
       for (const leg of config.legsData || []) {
         if (!['NFO', 'BFO', 'MCX'].includes(leg.exch)) continue;
 
-        // const diff = mainLtp * (config.otmDifference / 100);
-        // let strike = leg.optionType === 'PE' ? mainLtp - diff : mainLtp + diff;
-
-        // ⭐ FIX: always use a positive offset percentage so direction
-        // is never accidentally flipped by a negative otmDifference value
         const otmPercent = Math.abs(config.otmDifference || 0);
         const diff = otmPercent > 0 ? mainLtp * (otmPercent / 100) : 0;
-
-        // ⭐ PE is ALWAYS below main LTP, CE is ALWAYS above main LTP
-        // when otmDifference > 0. When otmDifference is 0, both sit at ATM.
         let strike = leg.optionType === 'PE' ? mainLtp - diff : mainLtp + diff;
 
-        // const isIndexToken = this.indexMaster.some(
-        //   (i) => i.token.toString() === config.tokenNumber,
-        // );
-        // // const isIndexToken = this.indexMaster.some(
-        // //   (i) => Number(i.token) === Number(config.tokenNumber),
-        // // );
-
-        // const roundStep = isIndexToken ? 50 : 100; // round step for index tokens is 50 NSE, for others is 100
-
-        // find the specific index entry that matches this config's token (and exchange, to avoid collisions)
-        // const matchedIndex = this.indexMaster.find(
-        //   (i) =>
-        //     i.token.toString() === config.tokenNumber &&
-        //     i.exchange === config.exchange,
-        // );
-
-        // // round step is 50 only for NIFTY, 100 for everything else (BANKNIFTY, SENSEX, non-index)
-        // const roundStep = matchedIndex?.symbol === 'NIFTY' ? 50 : 100;
-
-        // find (or auto-create) the specific index entry that matches this config's token+exchange
         const matchedIndex = this.ensureIndexMasterEntry(config);
+        const roundStep = matchedIndex?.roundStep ?? 100;
 
-        const roundStep = matchedIndex?.roundStep ?? 100; // fallback if entry couldn't be created
-        //const roundStep = isIndexToken ? 100 : 100;
-        // strike = this.roundStrike(strike, roundStep);
         strike =
           otmPercent > 0
             ? this.roundStrike(
@@ -226,11 +219,7 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
                 roundStep,
                 leg.optionType === 'PE' ? 'down' : 'up',
               )
-            : this.roundStrike(strike, roundStep, 'nearest'); // ATM when otm is 0
-
-        // this.logger.debug(
-        //   `Leg ${leg.tradingSymbol} | mainLtp=${mainLtp} | otmPercent=${otmPercent} | diff=${diff} | strike=${strike}`,
-        // );
+            : this.roundStrike(strike, roundStep, 'nearest');
 
         const instrument = this.instrumentData.find(
           (inst) =>
@@ -239,41 +228,104 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
             inst.optionType === leg.optionType &&
             inst.expiry === leg.expiry &&
             inst.strikePrice === strike &&
-            // inst.symbol ===
-            //   this.indexMaster.find(
-            //     (i) => i.token.toString() === config.tokenNumber,
-            //   )?.symbol, // Match symbol from index master
-            inst.symbol === matchedIndex?.symbol, // trying with this
-          // inst.symbol === config.symbolName,
+            inst.symbol === matchedIndex?.symbol,
         );
 
         if (!instrument) continue;
-
-        // this.logger.debug(
-        //   `Leg ${leg.tradingSymbol} | Found instrument: ${instrument.tradingSymbol} | token=${instrument.token}`,
-        // );
-
-        // leg.tokenNumber = String(instrument.token);
-        // leg.tradingSymbol = instrument.tradingSymbol;
-        // =====================================================
-        // LOCK STRIKE IF POSITION ALREADY OPEN
-        // =====================================================
 
         const isPositionOpen = await this.hasOpenPosition(
           leg.exch,
           leg.tokenNumber,
         );
 
-        if (!isPositionOpen) {
-          const newToken = String(instrument.token);
-          const newSymbol = instrument.tradingSymbol;
+        const newToken = String(instrument.token);
+        const newSymbol = instrument.tradingSymbol;
 
-          // leg.tokenNumber = String(instrument.token);
-          // leg.tradingSymbol = instrument.tradingSymbol;
+        const effectiveAmount = this.getEffectiveAmountForLeg(config, leg);
+        const rawQty = this.calculateLegQuantity(
+          effectiveAmount,
+          leg.legLtp,
+          instrument.lotSize,
+        );
+
+        computations.push({
+          leg,
+          instrument,
+          isPositionOpen,
+          newToken,
+          newSymbol,
+          legLtpForCalc: leg.legLtp,
+          rawQty,
+        });
+      }
+
+      // =====================================================
+      // PHASE 2 — apply maxLotPerLegAllowed cap across all legs
+      // =====================================================
+      const maxLotPerLegAllowed = this.getMaxLotPerLegAllowed();
+      // this.logger.debug(
+      //   'max lot cap data from env  ==============>> ',
+      //   maxLotPerLegAllowed,
+      // );
+      const finalQtyMap = new Map<any, number | undefined>();
+      computations.forEach((c) => finalQtyMap.set(c.leg, c.rawQty));
+
+      if (maxLotPerLegAllowed > 0) {
+        // find the leg driving the breach (largest raw qty)
+        let breaching: LegComputation | undefined;
+        for (const c of computations) {
+          if (typeof c.rawQty !== 'number') continue;
+          if (!breaching || c.rawQty > (breaching.rawQty ?? -Infinity)) {
+            breaching = c;
+          }
+        }
+
+        if (breaching && (breaching.rawQty ?? 0) > maxLotPerLegAllowed) {
+          // amount that would produce EXACTLY maxLotPerLegAllowed lots
+          // for the leg that breached the cap
+          const cappedAmount =
+            maxLotPerLegAllowed *
+            (breaching.instrument.lotSize ?? 0) *
+            (breaching.legLtpForCalc ?? 0);
+
+          if (cappedAmount > 0) {
+            // re-derive EVERY leg's quantity from this same amount,
+            // preserving the price-based ratio between legs
+            for (const c of computations) {
+              const adjustedQty = this.calculateLegQuantity(
+                cappedAmount,
+                c.legLtpForCalc,
+                c.instrument.lotSize,
+              );
+
+              // safety net in case rounding still pushes a leg over
+              const safeQty =
+                typeof adjustedQty === 'number'
+                  ? Math.min(adjustedQty, maxLotPerLegAllowed)
+                  : adjustedQty;
+
+              finalQtyMap.set(c.leg, safeQty);
+            }
+
+            this.logger.debug(
+              `maxLotPerLegAllowed(${maxLotPerLegAllowed}) breached on ${breaching.newSymbol} ` +
+                `for ${config.strategyName} — rescaled all legs using implied amount ${cappedAmount.toFixed(2)}`,
+            );
+          }
+        }
+      }
+
+      // =====================================================
+      // PHASE 3 — commit computed values back onto the legs
+      // =====================================================
+      for (const c of computations) {
+        const { leg, instrument, isPositionOpen, newToken, newSymbol } = c;
+
+        if (!isPositionOpen) {
           if (leg.tokenNumber !== newToken || leg.tradingSymbol !== newSymbol) {
             leg.tokenNumber = newToken;
             leg.tradingSymbol = newSymbol;
-            isUpdated = true; // ⭐ only true on real change
+            isUpdated = true;
           }
         } else {
           this.logger.debug(
@@ -281,71 +333,230 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
           );
         }
 
-        // ⭐ CALCULATE QUANTITY
-        // const calculatedQty = this.calculateLegQuantity(
-        //   config.amountForLotCalEachLeg,
-        //   leg.legLtp,
-        //   instrument.lotSize,
-        // );
-        // ⭐ APPLY CE/PE AMOUNT MULTIPLIER BEFORE LOT CALCULATION
-        const effectiveAmount = this.getEffectiveAmountForLeg(config, leg);
-
-        // ⭐ CALCULATE QUANTITY
-        const calculatedQty = this.calculateLegQuantity(
-          effectiveAmount,
-          leg.legLtp,
-          instrument.lotSize,
-        );
-
-        // if (calculatedQty !== undefined) {
-        //   leg.quantityLots = calculatedQty;
-        // }
+        const calculatedQty = finalQtyMap.get(leg);
         if (calculatedQty !== undefined && leg.quantityLots !== calculatedQty) {
           leg.quantityLots = calculatedQty;
-          isUpdated = true; // ⭐ only true on real change
+          isUpdated = true;
         }
-
-        // run ratio calc, then check if ratios actually changed vs previous
-        const prevRatios = config.legsData.map((l) => l.ratio);
-        // ⭐ AFTER updating quantities for all legs adding ratio calculation based on quantity
-        this.calculateLegRatios(config.legsData);
-
-        const ratiosChanged = config.legsData.some(
-          (l, i) => l.ratio !== prevRatios[i],
-        );
-        if (ratiosChanged) isUpdated = true;
-        // completed comarison of data with previous data and updated the ratio if changed
 
         const legKey = `${leg.exch}|${instrument.token}`;
         const legTick = this.marketDataMap.get(legKey);
-
-        // this.logger.debug(`Leg ${leg.tradingSymbol} LTP: ${legTick?.lp}`);
-
         if (legTick) {
           leg.legLtp =
             leg.side === 'BUY'
               ? (legTick.sp1 ?? legTick.lp ?? undefined)
               : (legTick.bp1 ?? legTick.lp ?? undefined);
         }
-        // temporarily changing
-        isUpdated = true;
+
+        isUpdated = true; // preserved from your original code
       }
 
+      const prevRatios = config.legsData.map((l) => l.ratio);
+      this.calculateLegRatios(config.legsData);
+      const ratiosChanged = config.legsData.some(
+        (l, i) => l.ratio !== prevRatios[i],
+      );
+      if (ratiosChanged) isUpdated = true;
+
       if (isUpdated) {
-        // this.logger.debug(
-        //   `config data sending for update is : ${JSON.stringify(config)}`,
-        // );
         await this.autoStradleService.update(
           config._id.toString(),
-          // config as any,
-          { ltp: config.ltp, legsData: config.legsData } as any, // (from your earlier fix)
-          'CRON', // ⭐ NEW — tag this as cron-originated so it respects the lock
+          { ltp: config.ltp, legsData: config.legsData } as any,
+          'CRON',
         );
       }
     } catch (error) {
       this.logger.error(`updateSingleStrategy error`, error?.stack || error);
     }
   }
+  // old working properly without cap of max lots
+  // private async updateSingleStrategy(config: AutoStradleDataEntity) {
+  //   try {
+  //     const mainKey = `${config.exchange}|${config.tokenNumber}`;
+  //     const mainTick = this.marketDataMap.get(mainKey);
+
+  //     // this.logger.debug(
+  //     //   `Main LTP for ${config.strategyName}: Symbol/token ${mainKey} ${mainTick?.lp} and updated Main LTP in config: ${config.ltp}`,
+  //     // );
+
+  //     if (!mainTick?.lp) return;
+
+  //     const mainLtp = mainTick.lp;
+  //     config.ltp = mainLtp;
+
+  //     // this.logger.debug(
+  //     //   `Main LTP for ${config.strategyName}: Symbol/token ${mainKey} ${mainTick?.lp} and updated Main LTP in config: ${config.ltp}`,
+  //     // );
+
+  //     let isUpdated = false;
+
+  //     for (const leg of config.legsData || []) {
+  //       if (!['NFO', 'BFO', 'MCX'].includes(leg.exch)) continue;
+
+  //       // const diff = mainLtp * (config.otmDifference / 100);
+  //       // let strike = leg.optionType === 'PE' ? mainLtp - diff : mainLtp + diff;
+
+  //       // ⭐ FIX: always use a positive offset percentage so direction
+  //       // is never accidentally flipped by a negative otmDifference value
+  //       const otmPercent = Math.abs(config.otmDifference || 0);
+  //       const diff = otmPercent > 0 ? mainLtp * (otmPercent / 100) : 0;
+
+  //       // ⭐ PE is ALWAYS below main LTP, CE is ALWAYS above main LTP
+  //       // when otmDifference > 0. When otmDifference is 0, both sit at ATM.
+  //       let strike = leg.optionType === 'PE' ? mainLtp - diff : mainLtp + diff;
+
+  //       // const isIndexToken = this.indexMaster.some(
+  //       //   (i) => i.token.toString() === config.tokenNumber,
+  //       // );
+  //       // // const isIndexToken = this.indexMaster.some(
+  //       // //   (i) => Number(i.token) === Number(config.tokenNumber),
+  //       // // );
+
+  //       // const roundStep = isIndexToken ? 50 : 100; // round step for index tokens is 50 NSE, for others is 100
+
+  //       // find the specific index entry that matches this config's token (and exchange, to avoid collisions)
+  //       // const matchedIndex = this.indexMaster.find(
+  //       //   (i) =>
+  //       //     i.token.toString() === config.tokenNumber &&
+  //       //     i.exchange === config.exchange,
+  //       // );
+
+  //       // // round step is 50 only for NIFTY, 100 for everything else (BANKNIFTY, SENSEX, non-index)
+  //       // const roundStep = matchedIndex?.symbol === 'NIFTY' ? 50 : 100;
+
+  //       // find (or auto-create) the specific index entry that matches this config's token+exchange
+  //       const matchedIndex = this.ensureIndexMasterEntry(config);
+
+  //       const roundStep = matchedIndex?.roundStep ?? 100; // fallback if entry couldn't be created
+  //       //const roundStep = isIndexToken ? 100 : 100;
+  //       // strike = this.roundStrike(strike, roundStep);
+  //       strike =
+  //         otmPercent > 0
+  //           ? this.roundStrike(
+  //               strike,
+  //               roundStep,
+  //               leg.optionType === 'PE' ? 'down' : 'up',
+  //             )
+  //           : this.roundStrike(strike, roundStep, 'nearest'); // ATM when otm is 0
+
+  //       // this.logger.debug(
+  //       //   `Leg ${leg.tradingSymbol} | mainLtp=${mainLtp} | otmPercent=${otmPercent} | diff=${diff} | strike=${strike}`,
+  //       // );
+
+  //       const instrument = this.instrumentData.find(
+  //         (inst) =>
+  //           inst.exchange === leg.exch &&
+  //           inst.instrument === leg.instrument &&
+  //           inst.optionType === leg.optionType &&
+  //           inst.expiry === leg.expiry &&
+  //           inst.strikePrice === strike &&
+  //           // inst.symbol ===
+  //           //   this.indexMaster.find(
+  //           //     (i) => i.token.toString() === config.tokenNumber,
+  //           //   )?.symbol, // Match symbol from index master
+  //           inst.symbol === matchedIndex?.symbol, // trying with this
+  //         // inst.symbol === config.symbolName,
+  //       );
+
+  //       if (!instrument) continue;
+
+  //       // this.logger.debug(
+  //       //   `Leg ${leg.tradingSymbol} | Found instrument: ${instrument.tradingSymbol} | token=${instrument.token}`,
+  //       // );
+
+  //       // leg.tokenNumber = String(instrument.token);
+  //       // leg.tradingSymbol = instrument.tradingSymbol;
+  //       // =====================================================
+  //       // LOCK STRIKE IF POSITION ALREADY OPEN
+  //       // =====================================================
+
+  //       const isPositionOpen = await this.hasOpenPosition(
+  //         leg.exch,
+  //         leg.tokenNumber,
+  //       );
+
+  //       if (!isPositionOpen) {
+  //         const newToken = String(instrument.token);
+  //         const newSymbol = instrument.tradingSymbol;
+
+  //         // leg.tokenNumber = String(instrument.token);
+  //         // leg.tradingSymbol = instrument.tradingSymbol;
+  //         if (leg.tokenNumber !== newToken || leg.tradingSymbol !== newSymbol) {
+  //           leg.tokenNumber = newToken;
+  //           leg.tradingSymbol = newSymbol;
+  //           isUpdated = true; // ⭐ only true on real change
+  //         }
+  //       } else {
+  //         this.logger.debug(
+  //           `Strike locked for ${leg.tradingSymbol} — position already open.`,
+  //         );
+  //       }
+
+  //       // ⭐ CALCULATE QUANTITY
+  //       // const calculatedQty = this.calculateLegQuantity(
+  //       //   config.amountForLotCalEachLeg,
+  //       //   leg.legLtp,
+  //       //   instrument.lotSize,
+  //       // );
+  //       // ⭐ APPLY CE/PE AMOUNT MULTIPLIER BEFORE LOT CALCULATION
+  //       const effectiveAmount = this.getEffectiveAmountForLeg(config, leg);
+
+  //       // ⭐ CALCULATE QUANTITY
+  //       const calculatedQty = this.calculateLegQuantity(
+  //         effectiveAmount,
+  //         leg.legLtp,
+  //         instrument.lotSize,
+  //       );
+
+  //       // if (calculatedQty !== undefined) {
+  //       //   leg.quantityLots = calculatedQty;
+  //       // }
+  //       if (calculatedQty !== undefined && leg.quantityLots !== calculatedQty) {
+  //         leg.quantityLots = calculatedQty;
+  //         isUpdated = true; // ⭐ only true on real change
+  //       }
+
+  //       // run ratio calc, then check if ratios actually changed vs previous
+  //       const prevRatios = config.legsData.map((l) => l.ratio);
+  //       // ⭐ AFTER updating quantities for all legs adding ratio calculation based on quantity
+  //       this.calculateLegRatios(config.legsData);
+
+  //       const ratiosChanged = config.legsData.some(
+  //         (l, i) => l.ratio !== prevRatios[i],
+  //       );
+  //       if (ratiosChanged) isUpdated = true;
+  //       // completed comarison of data with previous data and updated the ratio if changed
+
+  //       const legKey = `${leg.exch}|${instrument.token}`;
+  //       const legTick = this.marketDataMap.get(legKey);
+
+  //       // this.logger.debug(`Leg ${leg.tradingSymbol} LTP: ${legTick?.lp}`);
+
+  //       if (legTick) {
+  //         leg.legLtp =
+  //           leg.side === 'BUY'
+  //             ? (legTick.sp1 ?? legTick.lp ?? undefined)
+  //             : (legTick.bp1 ?? legTick.lp ?? undefined);
+  //       }
+  //       // temporarily changing
+  //       isUpdated = true;
+  //     }
+
+  //     if (isUpdated) {
+  //       // this.logger.debug(
+  //       //   `config data sending for update is : ${JSON.stringify(config)}`,
+  //       // );
+  //       await this.autoStradleService.update(
+  //         config._id.toString(),
+  //         // config as any,
+  //         { ltp: config.ltp, legsData: config.legsData } as any, // (from your earlier fix)
+  //         'CRON', // ⭐ NEW — tag this as cron-originated so it respects the lock
+  //       );
+  //     }
+  //   } catch (error) {
+  //     this.logger.error(`updateSingleStrategy error`, error?.stack || error);
+  //   }
+  // }
 
   // =====================================================
   // ROUND STRIKE
