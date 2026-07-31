@@ -177,6 +177,11 @@ export class AutoStradleExecutionService implements OnModuleInit {
 
       // ---- PHASE 2: reconcile once, top up any gap ----
       await this.sleep(4000); // let broker/exchange settle order state
+      this.logger.warn('==============================');
+      this.logger.warn('Starting Reconcile...');
+      this.logger.warn(`Current Time : ${new Date().toISOString()}`);
+      this.logger.warn('==============================');
+
       await this.reconcileAndTopUp(
         config,
         legA,
@@ -292,7 +297,17 @@ export class AutoStradleExecutionService implements OnModuleInit {
     desiredALots,
     desiredBLots,
   ) {
-    const netPositions = await this.exchangeDataService.getNetPositions();
+    // const netPositions = await this.exchangeDataService.getNetPositions();
+    this.logger.warn('Fetching latest Net Positions...');
+
+    // const netPositions = this.exchangeDataService.getNetPositions();
+    const netPositions =
+      await this.exchangeDataService.waitForFreshNetPositions(); // just for safty
+
+    this.logger.warn(
+      `Received ${Array.isArray(netPositions) ? netPositions.length : 0} positions`,
+    );
+
     const netALots =
       (this.getNetPositionQty(netPositions, legA.tokenNumber, legA.exch) *
         sideMultiplierA) /
@@ -301,6 +316,20 @@ export class AutoStradleExecutionService implements OnModuleInit {
       (this.getNetPositionQty(netPositions, legB.tokenNumber, legB.exch) *
         sideMultiplierB) /
       lotB;
+
+    // debug log to find quantity
+    this.logger.warn('========== RECONCILE ==========');
+
+    this.logger.warn({
+      desiredALots,
+      desiredBLots,
+      lotA,
+      lotB,
+      sideMultiplierA,
+      sideMultiplierB,
+      netALots,
+      netBLots,
+    });
 
     const gapA = Math.max(0, desiredALots - netALots);
     const gapB = Math.max(0, desiredBLots - netBLots);
@@ -316,6 +345,9 @@ export class AutoStradleExecutionService implements OnModuleInit {
 
     const qtyA = gapA * lotA;
     const qtyB = gapB * lotB;
+    // logger to find issue
+    this.logger.error(`TOPUP REQUIRED -> QtyA=${qtyA} QtyB=${qtyB}`);
+
     await this.placeBatchOrders(config, legA, legB, qtyA, qtyB);
 
     // Optional: one more short wait + one more reconcile check if you want a safety net,
@@ -693,6 +725,29 @@ export class AutoStradleExecutionService implements OnModuleInit {
 
         return pToken === normalizedToken && pExchange === normalizedExchange;
       });
+
+      // log area for debug
+      this.logger.warn(
+        `Searching Token=${normalizedToken} Exchange=${normalizedExchange}`,
+      );
+
+      this.logger.warn(`Matched Positions = ${matched.length}`);
+
+      matched.forEach((p) => {
+        this.logger.warn(
+          JSON.stringify(
+            {
+              token: p.token,
+              exch: p.raw?.exch,
+              netqty: p.raw?.netqty,
+              tsym: p.tsym,
+            },
+            null,
+            2,
+          ),
+        );
+      });
+      // log are ends
 
       const total = matched.reduce(
         (sum: number, p: any) => sum + Number(p.raw?.netqty ?? 0),

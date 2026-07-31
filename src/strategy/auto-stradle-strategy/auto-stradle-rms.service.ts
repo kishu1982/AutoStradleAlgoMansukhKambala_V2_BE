@@ -287,17 +287,35 @@ export class AutoStradleRMSService implements OnModuleInit {
   // =====================================================
   // SAVE JSON IF OPEN
   // =====================================================
-
+  private dirtyConfigs = new Map<string, any>();
   private persistConfig(config: any) {
-    try {
-      const file = path.join(this.SAVE_PATH, `${config._id}.json`);
-
-      fs.writeFileSync(file, JSON.stringify(config, null, 2));
-      this.logger.debug(`Writing JSON file ${config._id}`);
-    } catch (err) {
-      this.logger.error('persistConfig error', err?.stack || err);
-    }
+    this.dirtyConfigs.set(String(config._id), config);
   }
+  @Interval(1000)
+  async flushJsonFiles() {
+    if (this.dirtyConfigs.size === 0) return;
+
+    const configs = [...this.dirtyConfigs.values()];
+    this.dirtyConfigs.clear();
+
+    await Promise.all(
+      configs.map(async (config) => {
+        const file = path.join(this.SAVE_PATH, `${config._id}.json`);
+
+        await fs.promises.writeFile(file, JSON.stringify(config, null, 2));
+      }),
+    );
+  }
+  // private persistConfig(config: any) {
+  //   try {
+  //     const file = path.join(this.SAVE_PATH, `${config._id}.json`);
+
+  //     fs.writeFileSync(file, JSON.stringify(config, null, 2));
+  //     this.logger.debug(`Writing JSON file ${config._id}`);
+  //   } catch (err) {
+  //     this.logger.error('persistConfig error', err?.stack || err);
+  //   }
+  // }
 
   // =====================================================
   // DELETE FILE IF CLOSED
@@ -1380,7 +1398,9 @@ Topup
 
   // reconcile part
   private async reconcileExit(config, legA, legB, reason) {
-    const netPositions = await this.exchangeDataService.getNetPositions();
+    // const netPositions = this.exchangeDataService.getNetPositions();
+    const netPositions =
+      await this.exchangeDataService.waitForFreshNetPositions(); // just for safty
 
     const netA = this.getNetPositionQty(
       netPositions,

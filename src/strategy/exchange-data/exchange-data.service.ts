@@ -93,6 +93,21 @@ export class ExchangeDataService implements OnModuleInit {
   // SCHEDULER EVERY 2 SEC
   // --------------------------------
 
+  // @Cron('*/2 * * * * *')
+  // async autoSyncScheduler() {
+  //   try {
+  //     await this.queueSync(async () => {
+  //       await this.safeSync(() => this.syncOrderBook());
+  //       await this.safeSync(() => this.syncTradeBook());
+  //       await this.safeSync(() => this.syncNetPositions());
+
+  //       await this.safeSync(() => this.loadAllCachesFromDB());
+  //     });
+  //   } catch (err) {
+  //     this.logger.error('Scheduler error', err?.stack || err);
+  //   }
+  // }
+
   @Cron('*/2 * * * * *')
   async autoSyncScheduler() {
     try {
@@ -100,8 +115,6 @@ export class ExchangeDataService implements OnModuleInit {
         await this.safeSync(() => this.syncOrderBook());
         await this.safeSync(() => this.syncTradeBook());
         await this.safeSync(() => this.syncNetPositions());
-
-        await this.safeSync(() => this.loadAllCachesFromDB());
       });
     } catch (err) {
       this.logger.error('Scheduler error', err?.stack || err);
@@ -134,6 +147,14 @@ export class ExchangeDataService implements OnModuleInit {
     return this.tradeCache;
   }
 
+  // async getNetPositions() {
+  //   // return this.netPositionCache;
+  //   await this.syncNetPositions();
+
+  //   await this.loadAllCachesFromDB();
+
+  //   return this.netPositionCache;
+  // }
   getNetPositions() {
     return this.netPositionCache;
   }
@@ -142,11 +163,110 @@ export class ExchangeDataService implements OnModuleInit {
   // SYNC METHODS
   // --------------------------------
 
+  // private async syncOrderBook() {
+  //   const data = await this.ordersService.getOrderBook();
+  //   const trades = data?.trades ?? [];
+
+  //   await this.syncCollection(this.orderRepo, trades);
+  // }
+
+  // private async syncTradeBook() {
+  //   const data = await this.ordersService.getTradeBook();
+  //   const trades = data?.trades ?? [];
+
+  //   await this.syncCollection(this.tradeRepo, trades);
+  // }
+
+  // private async syncNetPositions() {
+  //   const response = await this.ordersService.getNetPositions();
+  //   const positions = response?.data ?? [];
+
+  //   await this.netPositionRepo.deleteMany({});
+
+  //   if (!positions.length) return;
+
+  //   await this.netPositionRepo.insertMany(
+  //     positions.map((pos) => ({
+  //       token: pos.token,
+  //       tsym: pos.tsym,
+  //       raw: pos,
+  //     })),
+  //   );
+  // }
+  // private async syncNetPositions() {
+  //   const maxRetry = 5;
+
+  //   for (let attempt = 1; attempt <= maxRetry; attempt++) {
+  //     const response = await this.ordersService.getNetPositions();
+  //     const positions = response?.data ?? [];
+
+  //     // DEBUG
+  //     this.logger.warn(
+  //       `NetPosition Sync Attempt ${attempt} : ${positions.length} positions`,
+  //     );
+
+  //     // If at least one position has non-zero qty, assume broker updated
+  //     const hasLivePosition = positions.some((p) => Number(p.netqty) !== 0);
+
+  //     if (hasLivePosition || attempt === maxRetry) {
+  //       await this.netPositionRepo.deleteMany({});
+
+  //       if (positions.length) {
+  //         await this.netPositionRepo.insertMany(
+  //           positions.map((pos) => ({
+  //             token: pos.token,
+  //             tsym: pos.tsym,
+  //             raw: pos,
+  //           })),
+  //         );
+  //       }
+
+  //       return;
+  //     }
+
+  //     this.logger.warn(
+  //       `Broker not updated yet. Retrying NetPosition in 500ms...`,
+  //     );
+
+  //     await new Promise((r) => setTimeout(r, 200));
+  //   }
+  // }
+  // private async syncNetPositions() {
+  //   const response = await this.ordersService.getNetPositions();
+  //   const positions = response?.data ?? [];
+
+  //   await this.netPositionRepo.deleteMany({});
+
+  //   if (positions.length) {
+  //     await this.netPositionRepo.insertMany(
+  //       positions.map((pos) => ({
+  //         token: pos.token,
+  //         tsym: pos.tsym,
+  //         raw: pos,
+  //       })),
+  //     );
+  //     this.netPositionCache = positions.map((pos) => ({
+  //       token: pos.token,
+  //       tsym: pos.tsym,
+  //       raw: pos,
+  //     }));
+  //   }
+  // }
+
+  // new method to sync data but not to call mongodb again and again
   private async syncOrderBook() {
     const data = await this.ordersService.getOrderBook();
-    const trades = data?.trades ?? [];
+    const orders = data?.trades ?? [];
 
-    await this.syncCollection(this.orderRepo, trades);
+    await this.syncCollection(this.orderRepo, orders);
+
+    // ⭐ Update memory cache directly
+    this.orderCache = orders.map((order) => ({
+      norenordno: order.norenordno,
+      exchordid: order.exchordid,
+      tradeDate: new Date().toISOString().split('T')[0],
+      raw: order,
+    }));
   }
 
   private async syncTradeBook() {
@@ -154,6 +274,14 @@ export class ExchangeDataService implements OnModuleInit {
     const trades = data?.trades ?? [];
 
     await this.syncCollection(this.tradeRepo, trades);
+
+    // ⭐ Update memory cache directly
+    this.tradeCache = trades.map((trade) => ({
+      norenordno: trade.norenordno,
+      exchordid: trade.exchordid,
+      tradeDate: new Date().toISOString().split('T')[0],
+      raw: trade,
+    }));
   }
 
   private async syncNetPositions() {
@@ -162,15 +290,41 @@ export class ExchangeDataService implements OnModuleInit {
 
     await this.netPositionRepo.deleteMany({});
 
-    if (!positions.length) return;
-
-    await this.netPositionRepo.insertMany(
-      positions.map((pos) => ({
+    if (positions.length) {
+      const docs = positions.map((pos) => ({
         token: pos.token,
         tsym: pos.tsym,
         raw: pos,
-      })),
-    );
+      }));
+
+      await this.netPositionRepo.insertMany(docs);
+
+      // ⭐ Update cache immediately
+      this.netPositionCache = docs;
+    } else {
+      this.netPositionCache = [];
+    }
+  }
+
+  // retry for required
+  async waitForFreshNetPositions(maxRetry = 3) {
+    for (let i = 1; i <= maxRetry; i++) {
+      await this.forceNetPositionSync();
+
+      const positions = this.getNetPositions();
+
+      const hasLivePosition = positions.some(
+        (p) => Number(p.raw?.netqty ?? 0) !== 0,
+      );
+
+      if (hasLivePosition) {
+        return positions;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+
+    return this.getNetPositions();
   }
 
   private async syncCollection(repo: MongoRepository<any>, trades: any[]) {
@@ -235,14 +389,24 @@ export class ExchangeDataService implements OnModuleInit {
     try {
       this.logger.log('Websocket triggered exchange sync');
 
+      // await this.queueSync(async () => {
+      //   await this.safeSync(() => this.syncOrderBook());
+
+      //   await this.safeSync(() => this.syncTradeBook());
+
+      //   await this.safeSync(() => this.syncNetPositions());
+
+      //   await this.safeSync(() => this.loadAllCachesFromDB());
+
+      //   // cache stale issue to resolve
+      //   await this.loadAllCachesFromDB();
+      // });
       await this.queueSync(async () => {
         await this.safeSync(() => this.syncOrderBook());
 
         await this.safeSync(() => this.syncTradeBook());
 
         await this.safeSync(() => this.syncNetPositions());
-
-        await this.safeSync(() => this.loadAllCachesFromDB());
       });
 
       const orders = this.getOrders();
@@ -255,5 +419,15 @@ export class ExchangeDataService implements OnModuleInit {
     } catch (err) {
       this.logger.error('forceSyncFromWebsocket failed', err?.stack || err);
     }
+  }
+
+  async forceNetPositionSync() {
+    await this.queueSync(async () => {
+      await this.syncNetPositions();
+
+      // await this.loadAllCachesFromDB();
+    });
+
+    return this.netPositionCache;
   }
 }
