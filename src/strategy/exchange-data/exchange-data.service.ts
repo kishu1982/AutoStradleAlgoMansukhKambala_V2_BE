@@ -67,14 +67,51 @@ export class ExchangeDataService implements OnModuleInit {
   // SAFE QUEUE
   // --------------------------------
 
-  async queueSync(fn: () => Promise<void>) {
-    this.syncPromise = this.syncPromise
-      .then(() => fn())
-      .catch((err) => {
-        this.logger.error('Queue error', err?.stack || err);
-      });
+  // async queueSync(fn: () => Promise<void>) {
+  //   this.syncPromise = this.syncPromise
+  //     .then(() => fn())
+  //     .catch((err) => {
+  //       this.logger.error('Queue error', err?.stack || err);
+  //     });
 
-    return this.syncPromise;
+  //   return this.syncPromise;
+  // }
+  // async queueSync(fn: () => Promise<void>) {
+  //   this.logger.warn('QUEUE WAIT');
+
+  //   this.syncPromise = this.syncPromise
+  //     .then(async () => {
+  //       this.logger.warn('QUEUE START');
+
+  //       await fn();
+
+  //       this.logger.warn('QUEUE END');
+  //     })
+  //     .catch((err) => {
+  //       this.logger.error('Queue error', err?.stack || err);
+  //     });
+
+  //   return this.syncPromise;
+  // }
+
+  async queueSync(fn: () => Promise<void>) {
+    const previous = this.syncPromise;
+
+    const current = previous.then(async () => {
+      this.logger.warn('QUEUE START');
+
+      await fn();
+
+      this.logger.warn('QUEUE END');
+    });
+
+    // keep queue alive
+    this.syncPromise = current.catch((err) => {
+      this.logger.error('Queue error', err?.stack || err);
+    });
+
+    // IMPORTANT: return THIS job only
+    return current;
   }
 
   // --------------------------------
@@ -285,8 +322,14 @@ export class ExchangeDataService implements OnModuleInit {
   }
 
   private async syncNetPositions() {
+    this.logger.warn('SYNC NETPOS START');
+
     const response = await this.ordersService.getNetPositions();
+
+    this.logger.warn('BROKER RESPONSE RECEIVED');
+
     const positions = response?.data ?? [];
+    this.logger.warn(`POSITIONS = ${positions.length}`);
 
     await this.netPositionRepo.deleteMany({});
 
@@ -304,6 +347,7 @@ export class ExchangeDataService implements OnModuleInit {
     } else {
       this.netPositionCache = [];
     }
+    this.logger.warn('SYNC NETPOS END');
   }
 
   // retry for required
@@ -421,12 +465,27 @@ export class ExchangeDataService implements OnModuleInit {
     }
   }
 
+  // async forceNetPositionSync() {
+  //   await this.queueSync(async () => {
+  //     await this.syncNetPositions();
+
+  //     // await this.loadAllCachesFromDB();
+  //   });
+
+  //   return this.netPositionCache;
+  // }
   async forceNetPositionSync() {
+    this.logger.warn('FORCE SYNC - START');
+
     await this.queueSync(async () => {
+      this.logger.warn('FORCE SYNC - INSIDE QUEUE');
+
       await this.syncNetPositions();
 
-      // await this.loadAllCachesFromDB();
+      this.logger.warn('FORCE SYNC - syncNetPositions DONE');
     });
+
+    this.logger.warn('FORCE SYNC - END');
 
     return this.netPositionCache;
   }

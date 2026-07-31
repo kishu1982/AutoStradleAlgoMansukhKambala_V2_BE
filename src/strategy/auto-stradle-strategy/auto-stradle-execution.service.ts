@@ -119,6 +119,7 @@ export class AutoStradleExecutionService implements OnModuleInit {
 
   // new logic with quick trade and without check again and again
   private async executeStradle(config: any) {
+    this.logger.warn('>>>> executeStradle START');
     try {
       const [legA, legB] = config.legsData;
       if (!legA || !legB) return;
@@ -131,7 +132,28 @@ export class AutoStradleExecutionService implements OnModuleInit {
       const sideMultiplierB = legB.side === 'BUY' ? 1 : -1;
 
       // ---- PHASE 1: fire all batches fast, no per-batch position wait ----
-      let netPositions = await this.exchangeDataService.getNetPositions();
+      // let netPositions = await this.exchangeDataService.getNetPositions();
+      this.logger.warn('STEP 1');
+
+      // await this.exchangeDataService.forceNetPositionSync();
+      this.logger.warn('STEP 1A');
+
+      // await this.ordersService.getNetPositions();
+      const response = await this.ordersService.getNetPositions();
+
+      this.logger.warn('STEP 1B');
+
+      this.logger.warn('STEP 2');
+
+      // const netPositions = this.exchangeDataService.getNetPositions();
+      const netPositions = (response?.data ?? []).map((pos) => ({
+        token: pos.token,
+        tsym: pos.tsym,
+        raw: pos,
+      }));
+
+      this.logger.warn('STEP 3');
+
       let netALots =
         (this.getNetPositionQty(netPositions, legA.tokenNumber, legA.exch) *
           sideMultiplierA) /
@@ -158,6 +180,7 @@ export class AutoStradleExecutionService implements OnModuleInit {
         if (qtyA <= 0 && qtyB <= 0) break;
 
         // fire without awaiting position confirmation — just await price+placement
+        this.logger.warn('STEP 4');
         const placePromise = this.placeBatchOrders(
           config,
           legA,
@@ -165,6 +188,7 @@ export class AutoStradleExecutionService implements OnModuleInit {
           qtyA,
           qtyB,
         );
+        this.logger.warn('STEP 5');
         firePromises.push(placePromise);
 
         remainingALots -= batch[legA.tokenNumber];
@@ -173,15 +197,18 @@ export class AutoStradleExecutionService implements OnModuleInit {
         await this.sleep(200); // small stagger for broker API, NOT a position poll
       }
 
+      this.logger.warn('STEP 6');
       await Promise.allSettled(firePromises);
 
       // ---- PHASE 2: reconcile once, top up any gap ----
+      this.logger.warn('STEP 7');
       await this.sleep(4000); // let broker/exchange settle order state
       this.logger.warn('==============================');
       this.logger.warn('Starting Reconcile...');
       this.logger.warn(`Current Time : ${new Date().toISOString()}`);
       this.logger.warn('==============================');
 
+      this.logger.warn('STEP 8');
       await this.reconcileAndTopUp(
         config,
         legA,
@@ -193,8 +220,11 @@ export class AutoStradleExecutionService implements OnModuleInit {
         desiredALots,
         desiredBLots,
       );
+      this.logger.warn('STEP 9');
     } catch (err) {
       this.logger.error('executeStradle error', err?.stack || err);
+    } finally {
+      this.logger.warn('<<<< executeStradle END');
     }
   }
 
@@ -206,6 +236,7 @@ export class AutoStradleExecutionService implements OnModuleInit {
     qtyB: number,
   ) {
     try {
+      this.logger.warn('PB-1');
       const [priceA, priceB] = await Promise.all([
         qtyA > 0
           ? this.getLimitPrice(legA.exch, legA.tokenNumber, legA.side)
@@ -238,8 +269,10 @@ export class AutoStradleExecutionService implements OnModuleInit {
       if (qtyA > 0) orderCount++;
       if (qtyB > 0) orderCount++;
 
+      this.logger.warn('PB-2');
       await this.throttleOrders(orderCount);
       // now place order
+      this.logger.warn('PB-3');
       const [orderResA, orderResB] = await Promise.allSettled([
         qtyA > 0
           ? this.ordersService.placeOrder({
@@ -279,7 +312,7 @@ export class AutoStradleExecutionService implements OnModuleInit {
       this.logger.debug(
         `Batch order results A: ${JSON.stringify(orderResA)} | B: ${JSON.stringify(orderResB)}`,
       );
-
+      this.logger.warn('PB-4');
       return { orderResA, orderResB };
     } catch (err) {
       this.logger.error('placeBatchOrders error', err?.stack || err);
