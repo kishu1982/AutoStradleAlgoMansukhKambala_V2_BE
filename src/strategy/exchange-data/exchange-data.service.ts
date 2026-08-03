@@ -117,6 +117,32 @@ export class ExchangeDataService implements OnModuleInit {
   }
 
   // --------------------------------
+  // DAILY CLEANUP — was previously a deleteMany({tradeDate: {$ne: today}})
+  // run on EVERY order/trade sync (i.e. every 2s, plus every getOrders/
+  // getTrades call). That's an unindexed inequality scan on the whole
+  // collection, paid every single call. Once a day is plenty.
+  // --------------------------------
+
+  @Cron('0 0 * * *') // midnight server time — adjust if you need IST specifically
+  async cleanupStaleOrdersAndTrades() {
+    try {
+      const today = new Date().toISOString().split('T')[0];
+
+      await Promise.all([
+        this.orderRepo.deleteMany({ tradeDate: { $ne: today } as any }),
+        this.tradeRepo.deleteMany({ tradeDate: { $ne: today } as any }),
+      ]);
+
+      this.logger.log('Daily cleanup of stale orders/trades complete');
+    } catch (err) {
+      this.logger.error(
+        'cleanupStaleOrdersAndTrades failed',
+        err?.stack || err,
+      );
+    }
+  }
+
+  // --------------------------------
   // CACHE LOADER (used only if you ever need to hydrate from DB, e.g. after a restart)
   // --------------------------------
 
@@ -176,30 +202,37 @@ export class ExchangeDataService implements OnModuleInit {
     const data = await this.ordersService.getOrderBook();
     const orders = data?.trades ?? [];
 
-    await this.syncCollection(this.orderRepo, orders);
-
-    // ⭐ Update memory cache directly
+    // ⭐ Update memory cache FIRST — this is what getOrders() is waiting on.
+    // DB persistence below does not block the getter.
     this.orderCache = orders.map((order) => ({
       norenordno: order.norenordno,
       exchordid: order.exchordid,
       tradeDate: new Date().toISOString().split('T')[0],
       raw: order,
     }));
+
+    // fire-and-forget persistence — history/audit only, not on the read path
+    this.syncCollection(this.orderRepo, orders).catch((err) =>
+      this.logger.error('syncOrderBook persist failed', err?.stack || err),
+    );
   }
 
   private async syncTradeBook() {
     const data = await this.ordersService.getTradeBook();
     const trades = data?.trades ?? [];
 
-    await this.syncCollection(this.tradeRepo, trades);
-
-    // ⭐ Update memory cache directly
+    // ⭐ Update memory cache FIRST — this is what getTrades() is waiting on.
     this.tradeCache = trades.map((trade) => ({
       norenordno: trade.norenordno,
       exchordid: trade.exchordid,
       tradeDate: new Date().toISOString().split('T')[0],
       raw: trade,
     }));
+
+    // fire-and-forget persistence
+    this.syncCollection(this.tradeRepo, trades).catch((err) =>
+      this.logger.error('syncTradeBook persist failed', err?.stack || err),
+    );
   }
 
   private async syncNetPositions() {
@@ -253,11 +286,6 @@ export class ExchangeDataService implements OnModuleInit {
   private async syncCollection(repo: MongoRepository<any>, trades: any[]) {
     try {
       const today = new Date().toISOString().split('T')[0];
-
-      // cleanup old data
-      await repo.deleteMany({
-        tradeDate: { $ne: today } as any,
-      });
 
       // ⭐ IMPORTANT FIX
       if (!Array.isArray(trades) || trades.length === 0) {
