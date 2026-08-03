@@ -18,13 +18,16 @@ export class ExchangeDataService implements OnModuleInit {
   private readonly logger = new Logger(ExchangeDataService.name);
   private clientUid = ''; // for future use if needed in filter or anywhere else, can be set from env or config
 
-  // ⭐ queue lock
-  private syncPromise: Promise<void> = Promise.resolve();
-
   // ⭐ memory cache
   private orderCache: any[] = [];
   private tradeCache: any[] = [];
   private netPositionCache: any[] = [];
+
+  // ⭐ three independent queues so a force-fetch of one resource
+  // never waits behind an unrelated sync
+  private orderSyncPromise: Promise<void> = Promise.resolve();
+  private tradeSyncPromise: Promise<void> = Promise.resolve();
+  private positionSyncPromise: Promise<void> = Promise.resolve();
 
   constructor(
     @InjectRepository(ExchangeOrder)
@@ -51,67 +54,14 @@ export class ExchangeDataService implements OnModuleInit {
     try {
       this.logger.log('ExchangeDataService initialized');
 
-      await this.queueSync(async () => {
-        await this.safeSync(() => this.syncOrderBook());
-        await this.safeSync(() => this.syncTradeBook());
-        await this.safeSync(() => this.syncNetPositions());
-      });
-
-      await this.loadAllCachesFromDB();
+      await Promise.all([
+        this.queue('order', () => this.syncOrderBook()),
+        this.queue('trade', () => this.syncTradeBook()),
+        this.queue('position', () => this.syncNetPositions()),
+      ]);
     } catch (err) {
       this.logger.error('Module init failed', err?.stack || err);
     }
-  }
-
-  // --------------------------------
-  // SAFE QUEUE
-  // --------------------------------
-
-  // async queueSync(fn: () => Promise<void>) {
-  //   this.syncPromise = this.syncPromise
-  //     .then(() => fn())
-  //     .catch((err) => {
-  //       this.logger.error('Queue error', err?.stack || err);
-  //     });
-
-  //   return this.syncPromise;
-  // }
-  // async queueSync(fn: () => Promise<void>) {
-  //   this.logger.warn('QUEUE WAIT');
-
-  //   this.syncPromise = this.syncPromise
-  //     .then(async () => {
-  //       this.logger.warn('QUEUE START');
-
-  //       await fn();
-
-  //       this.logger.warn('QUEUE END');
-  //     })
-  //     .catch((err) => {
-  //       this.logger.error('Queue error', err?.stack || err);
-  //     });
-
-  //   return this.syncPromise;
-  // }
-
-  async queueSync(fn: () => Promise<void>) {
-    const previous = this.syncPromise;
-
-    const current = previous.then(async () => {
-      this.logger.warn('QUEUE START');
-
-      await fn();
-
-      this.logger.warn('QUEUE END');
-    });
-
-    // keep queue alive
-    this.syncPromise = current.catch((err) => {
-      this.logger.error('Queue error', err?.stack || err);
-    });
-
-    // IMPORTANT: return THIS job only
-    return current;
   }
 
   // --------------------------------
@@ -127,39 +77,47 @@ export class ExchangeDataService implements OnModuleInit {
   }
 
   // --------------------------------
-  // SCHEDULER EVERY 2 SEC
+  // PER-RESOURCE QUEUE
   // --------------------------------
 
-  // @Cron('*/2 * * * * *')
-  // async autoSyncScheduler() {
-  //   try {
-  //     await this.queueSync(async () => {
-  //       await this.safeSync(() => this.syncOrderBook());
-  //       await this.safeSync(() => this.syncTradeBook());
-  //       await this.safeSync(() => this.syncNetPositions());
+  private queue(
+    which: 'order' | 'trade' | 'position',
+    fn: () => Promise<void>,
+  ): Promise<void> {
+    const prevMap = {
+      order: this.orderSyncPromise,
+      trade: this.tradeSyncPromise,
+      position: this.positionSyncPromise,
+    };
+    const previous = prevMap[which];
 
-  //       await this.safeSync(() => this.loadAllCachesFromDB());
-  //     });
-  //   } catch (err) {
-  //     this.logger.error('Scheduler error', err?.stack || err);
-  //   }
-  // }
+    const current = previous.then(() => this.safeSync(fn));
+
+    if (which === 'order') this.orderSyncPromise = current;
+    if (which === 'trade') this.tradeSyncPromise = current;
+    if (which === 'position') this.positionSyncPromise = current;
+
+    return current;
+  }
+
+  // --------------------------------
+  // SCHEDULER EVERY 2 SEC (background refresh for cached reads)
+  // --------------------------------
 
   @Cron('*/2 * * * * *')
   async autoSyncScheduler() {
     try {
-      await this.queueSync(async () => {
-        await this.safeSync(() => this.syncOrderBook());
-        await this.safeSync(() => this.syncTradeBook());
-        await this.safeSync(() => this.syncNetPositions());
-      });
+      // fire independently, don't serialize them behind each other
+      this.queue('order', () => this.syncOrderBook());
+      this.queue('trade', () => this.syncTradeBook());
+      this.queue('position', () => this.syncNetPositions());
     } catch (err) {
       this.logger.error('Scheduler error', err?.stack || err);
     }
   }
 
   // --------------------------------
-  // CACHE LOADER
+  // CACHE LOADER (used only if you ever need to hydrate from DB, e.g. after a restart)
   // --------------------------------
 
   async loadAllCachesFromDB() {
@@ -173,124 +131,47 @@ export class ExchangeDataService implements OnModuleInit {
   }
 
   // --------------------------------
-  // GETTERS for local cache (fast access for strategies)
+  // FRESH GETTERS — always hit the broker, then return
+  // Use these wherever staleness could cause a trading mistake
+  // (execution decisions, RMS exit checks, reconciliation, etc.)
   // --------------------------------
 
-  getOrders() {
+  async getNetPositions() {
+    await this.queue('position', () => this.syncNetPositions());
+    return this.netPositionCache;
+  }
+
+  async getOrders() {
+    await this.queue('order', () => this.syncOrderBook());
     return this.orderCache;
   }
 
-  getTrades() {
+  async getTrades() {
+    await this.queue('trade', () => this.syncTradeBook());
     return this.tradeCache;
   }
 
-  // async getNetPositions() {
-  //   // return this.netPositionCache;
-  //   await this.syncNetPositions();
+  // --------------------------------
+  // CACHED GETTERS — instant, no broker round trip
+  // Use these for non-urgent reads (UI polling, logging, low-priority checks)
+  // --------------------------------
 
-  //   await this.loadAllCachesFromDB();
-
-  //   return this.netPositionCache;
-  // }
-  getNetPositions() {
+  getCachedNetPositions() {
     return this.netPositionCache;
+  }
+
+  getCachedOrders() {
+    return this.orderCache;
+  }
+
+  getCachedTrades() {
+    return this.tradeCache;
   }
 
   // --------------------------------
   // SYNC METHODS
   // --------------------------------
 
-  // private async syncOrderBook() {
-  //   const data = await this.ordersService.getOrderBook();
-  //   const trades = data?.trades ?? [];
-
-  //   await this.syncCollection(this.orderRepo, trades);
-  // }
-
-  // private async syncTradeBook() {
-  //   const data = await this.ordersService.getTradeBook();
-  //   const trades = data?.trades ?? [];
-
-  //   await this.syncCollection(this.tradeRepo, trades);
-  // }
-
-  // private async syncNetPositions() {
-  //   const response = await this.ordersService.getNetPositions();
-  //   const positions = response?.data ?? [];
-
-  //   await this.netPositionRepo.deleteMany({});
-
-  //   if (!positions.length) return;
-
-  //   await this.netPositionRepo.insertMany(
-  //     positions.map((pos) => ({
-  //       token: pos.token,
-  //       tsym: pos.tsym,
-  //       raw: pos,
-  //     })),
-  //   );
-  // }
-  // private async syncNetPositions() {
-  //   const maxRetry = 5;
-
-  //   for (let attempt = 1; attempt <= maxRetry; attempt++) {
-  //     const response = await this.ordersService.getNetPositions();
-  //     const positions = response?.data ?? [];
-
-  //     // DEBUG
-  //     this.logger.warn(
-  //       `NetPosition Sync Attempt ${attempt} : ${positions.length} positions`,
-  //     );
-
-  //     // If at least one position has non-zero qty, assume broker updated
-  //     const hasLivePosition = positions.some((p) => Number(p.netqty) !== 0);
-
-  //     if (hasLivePosition || attempt === maxRetry) {
-  //       await this.netPositionRepo.deleteMany({});
-
-  //       if (positions.length) {
-  //         await this.netPositionRepo.insertMany(
-  //           positions.map((pos) => ({
-  //             token: pos.token,
-  //             tsym: pos.tsym,
-  //             raw: pos,
-  //           })),
-  //         );
-  //       }
-
-  //       return;
-  //     }
-
-  //     this.logger.warn(
-  //       `Broker not updated yet. Retrying NetPosition in 500ms...`,
-  //     );
-
-  //     await new Promise((r) => setTimeout(r, 200));
-  //   }
-  // }
-  // private async syncNetPositions() {
-  //   const response = await this.ordersService.getNetPositions();
-  //   const positions = response?.data ?? [];
-
-  //   await this.netPositionRepo.deleteMany({});
-
-  //   if (positions.length) {
-  //     await this.netPositionRepo.insertMany(
-  //       positions.map((pos) => ({
-  //         token: pos.token,
-  //         tsym: pos.tsym,
-  //         raw: pos,
-  //       })),
-  //     );
-  //     this.netPositionCache = positions.map((pos) => ({
-  //       token: pos.token,
-  //       tsym: pos.tsym,
-  //       raw: pos,
-  //     }));
-  //   }
-  // }
-
-  // new method to sync data but not to call mongodb again and again
   private async syncOrderBook() {
     const data = await this.ordersService.getOrderBook();
     const orders = data?.trades ?? [];
@@ -350,12 +231,10 @@ export class ExchangeDataService implements OnModuleInit {
     this.logger.warn('SYNC NETPOS END');
   }
 
-  // retry for required
+  // retry until broker reflects a non-zero position, or give up after maxRetry
   async waitForFreshNetPositions(maxRetry = 3) {
     for (let i = 1; i <= maxRetry; i++) {
-      await this.forceNetPositionSync();
-
-      const positions = this.getNetPositions();
+      const positions = await this.getNetPositions();
 
       const hasLivePosition = positions.some(
         (p) => Number(p.raw?.netqty ?? 0) !== 0,
@@ -417,11 +296,9 @@ export class ExchangeDataService implements OnModuleInit {
   }
 
   // --------------------------------
-  // FOR GIVING CLINET ID ON WHICH ALGO IS RUNNING
+  // FOR GIVING CLIENT ID ON WHICH ALGO IS RUNNING
   // --------------------------------
   getClientUid() {
-    const uid = this.clientUid;
-    console.log('Client UID requested:', uid); // 🔥 DEBUG
     return { AlgoId: this.clientUid };
   }
 
@@ -433,29 +310,15 @@ export class ExchangeDataService implements OnModuleInit {
     try {
       this.logger.log('Websocket triggered exchange sync');
 
-      // await this.queueSync(async () => {
-      //   await this.safeSync(() => this.syncOrderBook());
+      await Promise.all([
+        this.queue('order', () => this.syncOrderBook()),
+        this.queue('trade', () => this.syncTradeBook()),
+        this.queue('position', () => this.syncNetPositions()),
+      ]);
 
-      //   await this.safeSync(() => this.syncTradeBook());
-
-      //   await this.safeSync(() => this.syncNetPositions());
-
-      //   await this.safeSync(() => this.loadAllCachesFromDB());
-
-      //   // cache stale issue to resolve
-      //   await this.loadAllCachesFromDB();
-      // });
-      await this.queueSync(async () => {
-        await this.safeSync(() => this.syncOrderBook());
-
-        await this.safeSync(() => this.syncTradeBook());
-
-        await this.safeSync(() => this.syncNetPositions());
-      });
-
-      const orders = this.getOrders();
-      const trades = this.getTrades();
-      const netPositions = this.getNetPositions();
+      const orders = this.getCachedOrders();
+      const trades = this.getCachedTrades();
+      const netPositions = this.getCachedNetPositions();
 
       this.logger.log(
         `Sync complete. Orders: ${orders.length}, Trades: ${trades.length}, NetPositions: ${netPositions.length}`,
@@ -465,28 +328,11 @@ export class ExchangeDataService implements OnModuleInit {
     }
   }
 
-  // async forceNetPositionSync() {
-  //   await this.queueSync(async () => {
-  //     await this.syncNetPositions();
-
-  //     // await this.loadAllCachesFromDB();
-  //   });
-
-  //   return this.netPositionCache;
-  // }
+  // kept as a thin explicit wrapper — same as calling getNetPositions(),
+  // provided for readability at call sites that want to be explicit
+  // about "force a fresh sync" intent
   async forceNetPositionSync() {
-    this.logger.warn('FORCE SYNC - START');
-
-    await this.queueSync(async () => {
-      this.logger.warn('FORCE SYNC - INSIDE QUEUE');
-
-      await this.syncNetPositions();
-
-      this.logger.warn('FORCE SYNC - syncNetPositions DONE');
-    });
-
-    this.logger.warn('FORCE SYNC - END');
-
+    await this.queue('position', () => this.syncNetPositions());
     return this.netPositionCache;
   }
 }

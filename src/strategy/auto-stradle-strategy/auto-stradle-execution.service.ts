@@ -136,14 +136,14 @@ export class AutoStradleExecutionService implements OnModuleInit {
       this.logger.warn('STEP 1');
 
       // await this.exchangeDataService.forceNetPositionSync();
-      this.logger.warn('STEP 1A');
+      this.logger.warn('STEP 1A get net positions');
 
       // await this.ordersService.getNetPositions();
       const response = await this.ordersService.getNetPositions();
 
       this.logger.warn('STEP 1B');
 
-      this.logger.warn('STEP 2');
+      this.logger.warn('STEP 2 match net position data with config');
 
       // const netPositions = this.exchangeDataService.getNetPositions();
       const netPositions = (response?.data ?? []).map((pos) => ({
@@ -152,7 +152,7 @@ export class AutoStradleExecutionService implements OnModuleInit {
         raw: pos,
       }));
 
-      this.logger.warn('STEP 3');
+      this.logger.warn('STEP 3 calculate net lots for each leg');
 
       let netALots =
         (this.getNetPositionQty(netPositions, legA.tokenNumber, legA.exch) *
@@ -180,7 +180,7 @@ export class AutoStradleExecutionService implements OnModuleInit {
         if (qtyA <= 0 && qtyB <= 0) break;
 
         // fire without awaiting position confirmation — just await price+placement
-        this.logger.warn('STEP 4');
+        this.logger.warn('STEP 4 calculate limit prices and place orders');
         const placePromise = this.placeBatchOrders(
           config,
           legA,
@@ -188,7 +188,7 @@ export class AutoStradleExecutionService implements OnModuleInit {
           qtyA,
           qtyB,
         );
-        this.logger.warn('STEP 5');
+        this.logger.warn('STEP 5 push placePromise to firePromises');
         firePromises.push(placePromise);
 
         remainingALots -= batch[legA.tokenNumber];
@@ -197,18 +197,18 @@ export class AutoStradleExecutionService implements OnModuleInit {
         await this.sleep(200); // small stagger for broker API, NOT a position poll
       }
 
-      this.logger.warn('STEP 6');
+      this.logger.warn('STEP 6 await Promise.allSettled(firePromises)');
       await Promise.allSettled(firePromises);
 
       // ---- PHASE 2: reconcile once, top up any gap ----
-      this.logger.warn('STEP 7');
+      this.logger.warn('STEP 7 await reconciliation');
       await this.sleep(4000); // let broker/exchange settle order state
       this.logger.warn('==============================');
       this.logger.warn('Starting Reconcile...');
       this.logger.warn(`Current Time : ${new Date().toISOString()}`);
       this.logger.warn('==============================');
 
-      this.logger.warn('STEP 8');
+      this.logger.warn('STEP 8 call reconcileAndTopUp');
       await this.reconcileAndTopUp(
         config,
         legA,
@@ -236,7 +236,7 @@ export class AutoStradleExecutionService implements OnModuleInit {
     qtyB: number,
   ) {
     try {
-      this.logger.warn('PB-1');
+      this.logger.warn('PB-1 place bach orders');
       const [priceA, priceB] = await Promise.all([
         qtyA > 0
           ? this.getLimitPrice(legA.exch, legA.tokenNumber, legA.side)
@@ -269,7 +269,7 @@ export class AutoStradleExecutionService implements OnModuleInit {
       if (qtyA > 0) orderCount++;
       if (qtyB > 0) orderCount++;
 
-      this.logger.warn('PB-2');
+      this.logger.warn('PB-2 throttleOrders');
       await this.throttleOrders(orderCount);
       // now place order
       this.logger.warn('PB-3');
@@ -333,7 +333,8 @@ export class AutoStradleExecutionService implements OnModuleInit {
     // const netPositions = await this.exchangeDataService.getNetPositions();
     this.logger.warn('Fetching latest Net Positions...');
 
-    // const netPositions = this.exchangeDataService.getNetPositions();
+    this.logger.debug(`Fetching latest Net Positions for reconciliation...`);
+    // const netPositions = await this.exchangeDataService.getNetPositions();
     const netPositions =
       await this.exchangeDataService.waitForFreshNetPositions(); // just for safty
 
@@ -926,87 +927,87 @@ export class AutoStradleExecutionService implements OnModuleInit {
   }
 
   // wait for position update by polling net positions until change is detected or timeout occurs
-  private async waitForPositionUpdate(
-    legA,
-    legB,
-    prevNetA: number,
-    prevNetB: number,
-    timeout = 8000,
-  ): Promise<boolean> {
-    const start = Date.now();
+  // private async waitForPositionUpdate(
+  //   legA,
+  //   legB,
+  //   prevNetA: number,
+  //   prevNetB: number,
+  //   timeout = 8000,
+  // ): Promise<boolean> {
+  //   const start = Date.now();
 
-    while (Date.now() - start < timeout) {
-      await this.sleep(500);
+  //   while (Date.now() - start < timeout) {
+  //     await this.sleep(500);
 
-      const netPositions = await this.exchangeDataService.getNetPositions();
-      // this.logger.log('Checking for position update...', netPositions);
+  //     const netPositions = await this.exchangeDataService.getNetPositions();
+  //     // this.logger.log('Checking for position update...', netPositions);
 
-      const newNetA = this.getNetPositionQty(
-        netPositions,
-        legA.tokenNumber,
-        legA.exch,
-      );
+  //     const newNetA = this.getNetPositionQty(
+  //       netPositions,
+  //       legA.tokenNumber,
+  //       legA.exch,
+  //     );
 
-      const newNetB = this.getNetPositionQty(
-        netPositions,
-        legB.tokenNumber,
-        legB.exch,
-      );
+  //     const newNetB = this.getNetPositionQty(
+  //       netPositions,
+  //       legB.tokenNumber,
+  //       legB.exch,
+  //     );
 
-      if (newNetA !== prevNetA || newNetB !== prevNetB) {
-        this.logger.log(
-          `Position updated A:${prevNetA}->${newNetA} B:${prevNetB}->${newNetB}`,
-        );
-        return true;
-      }
-    }
+  //     if (newNetA !== prevNetA || newNetB !== prevNetB) {
+  //       this.logger.log(
+  //         `Position updated A:${prevNetA}->${newNetA} B:${prevNetB}->${newNetB}`,
+  //       );
+  //       return true;
+  //     }
+  //   }
 
-    return false;
-  }
+  //   return false;
+  // }
 
   // =====================================================
   // Check if any rejection happened in last X seconds
   // =====================================================
-  private hasRecentRejection(
-    orders: ExchangeOrder[],
-    legA,
-    legB,
-    windowSeconds = 60,
-  ): boolean {
-    try {
-      const now = Date.now();
+  // private hasRecentRejection(
+  //   orders: ExchangeOrder[],
+  //   legA,
+  //   legB,
+  //   windowSeconds = 60,
+  // ): boolean {
+  //   try {
+  //     const now = Date.now();
 
-      return orders.some((o: any) => {
-        // Must be rejected
-        if (o.raw?.status !== 'REJECTED') return false;
+  //     return orders.some((o: any) => {
+  //       // Must be rejected
+  //       if (o.raw?.status !== 'REJECTED') return false;
 
-        // Must belong to current legs
-        if (
-          o.raw?.token !== legA.tokenNumber &&
-          o.raw?.token !== legB.tokenNumber
-        ) {
-          return false;
-        }
+  //       // Must belong to current legs
+  //       if (
+  //         o.raw?.token !== legA.tokenNumber &&
+  //         o.raw?.token !== legB.tokenNumber
+  //       ) {
+  //         return false;
+  //       }
 
-        // Extract order time (adjust field if needed)
-        const orderTimeStr =
-          o.raw?.norentm || o.raw?.ordenttm || o.raw?.exch_tm || null;
+  //       // Extract order time (adjust field if needed)
+  //       const orderTimeStr =
+  //         o.raw?.norentm || o.raw?.ordenttm || o.raw?.exch_tm || null;
 
-        if (!orderTimeStr) return false;
+  //       if (!orderTimeStr) return false;
 
-        // ⚠️ If broker sends DD-MM-YYYY HH:mm:ss format,
-        // you may need proper parsing.
-        const orderTime = new Date(orderTimeStr).getTime();
+  //       // ⚠️ If broker sends DD-MM-YYYY HH:mm:ss format,
+  //       // you may need proper parsing.
+  //       const orderTime = new Date(orderTimeStr).getTime();
 
-        if (isNaN(orderTime)) return false;
+  //       if (isNaN(orderTime)) return false;
 
-        return now - orderTime <= windowSeconds * 1000;
-      });
-    } catch (err) {
-      this.logger.error('hasRecentRejection error', err?.stack || err);
-      return false;
-    }
-  }
+  //       return now - orderTime <= windowSeconds * 1000;
+  //     });
+  //   } catch (err) {
+  //     this.logger.error('hasRecentRejection error', err?.stack || err);
+  //     return false;
+  //   }
+  // }
 
   // helper to convert date string to epoch seconds (if needed for time comparisons)
   private convertISTToEpoch(dateTimeStr: string): string {
