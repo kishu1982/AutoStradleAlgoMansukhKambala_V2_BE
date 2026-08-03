@@ -13,6 +13,7 @@ import { AutoStradleExecutionController } from './auto-stradle-execution.control
 import { AutoStradleRMSService } from './auto-stradle-rms.service';
 import { TelegramModule } from 'src/telegram/telegram.module';
 import { AutoSquareOffService } from './auto-square-off.service';
+import { AutoSquareOffAllPositionsService } from './Auto-square-off-all-positions.service';
 
 @Module({
   imports: [
@@ -30,6 +31,7 @@ import { AutoSquareOffService } from './auto-square-off.service';
     AutoStradleExecutionService,
     AutoStradleRMSService, // ⭐ ADD THIS
     AutoSquareOffService,
+    AutoSquareOffAllPositionsService, // ⭐ ADD THIS
   ],
   exports: [AutoStradleStrategyService, AutoStradleRuntimeHelper],
 })
