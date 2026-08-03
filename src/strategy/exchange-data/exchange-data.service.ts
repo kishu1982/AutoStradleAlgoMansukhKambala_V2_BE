@@ -29,6 +29,14 @@ export class ExchangeDataService implements OnModuleInit {
   private tradeSyncPromise: Promise<void> = Promise.resolve();
   private positionSyncPromise: Promise<void> = Promise.resolve();
 
+  // ⭐ separate queues purely for the background DB writes, so that
+  // e.g. two rapid net-position syncs don't run their deleteMany+insertMany
+  // concurrently and interleave. These never block a getter — they only
+  // serialize against each other.
+  private orderPersistPromise: Promise<void> = Promise.resolve();
+  private tradePersistPromise: Promise<void> = Promise.resolve();
+  private positionPersistPromise: Promise<void> = Promise.resolve();
+
   constructor(
     @InjectRepository(ExchangeOrder)
     private readonly orderRepo: MongoRepository<ExchangeOrder>,
@@ -98,6 +106,27 @@ export class ExchangeDataService implements OnModuleInit {
     if (which === 'position') this.positionSyncPromise = current;
 
     return current;
+  }
+
+  // fire-and-forget writes go through here so they serialize against each
+  // other (no interleaved deleteMany/insertMany) without ever blocking a
+  // getter — callers never await this
+  private queuePersist(
+    which: 'order' | 'trade' | 'position',
+    fn: () => Promise<void>,
+  ): void {
+    const prevMap = {
+      order: this.orderPersistPromise,
+      trade: this.tradePersistPromise,
+      position: this.positionPersistPromise,
+    };
+    const previous = prevMap[which];
+
+    const current = previous.then(() => this.safeSync(fn));
+
+    if (which === 'order') this.orderPersistPromise = current;
+    if (which === 'trade') this.tradePersistPromise = current;
+    if (which === 'position') this.positionPersistPromise = current;
   }
 
   // --------------------------------
@@ -212,8 +241,9 @@ export class ExchangeDataService implements OnModuleInit {
     }));
 
     // fire-and-forget persistence — history/audit only, not on the read path
-    this.syncCollection(this.orderRepo, orders).catch((err) =>
-      this.logger.error('syncOrderBook persist failed', err?.stack || err),
+    // — serialized against other order-book persists, but never blocks the getter
+    this.queuePersist('order', () =>
+      this.syncCollection(this.orderRepo, orders),
     );
   }
 
@@ -229,9 +259,10 @@ export class ExchangeDataService implements OnModuleInit {
       raw: trade,
     }));
 
-    // fire-and-forget persistence
-    this.syncCollection(this.tradeRepo, trades).catch((err) =>
-      this.logger.error('syncTradeBook persist failed', err?.stack || err),
+    // fire-and-forget persistence — serialized against other trade persists,
+    // never blocks the getter
+    this.queuePersist('trade', () =>
+      this.syncCollection(this.tradeRepo, trades),
     );
   }
 
@@ -245,23 +276,32 @@ export class ExchangeDataService implements OnModuleInit {
     const positions = response?.data ?? [];
     this.logger.warn(`POSITIONS = ${positions.length}`);
 
+    const docs = positions.length
+      ? positions.map((pos) => ({
+          token: pos.token,
+          tsym: pos.tsym,
+          raw: pos,
+        }))
+      : [];
+
+    // ⭐ Update cache FIRST — this is what getNetPositions() is waiting on.
+    // Persistence to Mongo below does not block the getter, and is
+    // serialized against any other in-flight net-position persist.
+    this.netPositionCache = docs;
+
+    this.queuePersist('position', () => this.persistNetPositions(docs));
+
+    this.logger.warn('SYNC NETPOS END');
+  }
+
+  // fire-and-forget DB persistence for net positions — history/audit only,
+  // never on the read path. Cache is already fresh by the time this runs.
+  private async persistNetPositions(docs: any[]) {
     await this.netPositionRepo.deleteMany({});
 
-    if (positions.length) {
-      const docs = positions.map((pos) => ({
-        token: pos.token,
-        tsym: pos.tsym,
-        raw: pos,
-      }));
-
+    if (docs.length) {
       await this.netPositionRepo.insertMany(docs);
-
-      // ⭐ Update cache immediately
-      this.netPositionCache = docs;
-    } else {
-      this.netPositionCache = [];
     }
-    this.logger.warn('SYNC NETPOS END');
   }
 
   // retry until broker reflects a non-zero position, or give up after maxRetry
