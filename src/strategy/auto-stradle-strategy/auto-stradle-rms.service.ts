@@ -301,9 +301,14 @@ export class AutoStradleRMSService implements OnModuleInit {
 
     await Promise.all(
       configs.map(async (config) => {
-        const file = path.join(this.SAVE_PATH, `${config._id}.json`);
+        // const file = path.join(this.SAVE_PATH, `${config._id}.json`);
+        // await fs.promises.writeFile(file, JSON.stringify(config, null, 2));
 
-        await fs.promises.writeFile(file, JSON.stringify(config, null, 2));
+        const file = path.join(this.SAVE_PATH, `${config._id}.json`);
+        const tmpFile = `${file}.tmp`;
+
+        await fs.promises.writeFile(tmpFile, JSON.stringify(config, null, 2));
+        await fs.promises.rename(tmpFile, file);
       }),
     );
   }
