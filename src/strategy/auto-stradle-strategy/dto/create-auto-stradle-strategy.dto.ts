@@ -1,4 +1,4 @@
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   IsEnum,
   IsNotEmpty,
@@ -99,4 +99,9 @@ export class CreateAutoStradleStrategyDto {
   @IsNumber()
   @Min(0, { message: 'exitRatio cannot be negative' })
   exitRatio?: number; // default 1.75 if not provided
+
+  @IsOptional()
+  @Transform(({ value }) => value ?? 0)
+  @IsNumber({}, { message: 'underlyingDifference must be a number' })
+  underlyingDifference?: number = 0;
 }

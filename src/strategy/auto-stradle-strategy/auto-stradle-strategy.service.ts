@@ -81,6 +81,7 @@ export class AutoStradleStrategyService {
         profitBookingPercentage: dto.profitBookingPercentage,
         stoplossBookingPercentage: dto.stoplossBookingPercentage,
         otmDifference: dto.otmDifference,
+        underlyingDifference: dto.underlyingDifference ?? 0, // ⭐ NEW
         status: dto.status || 'ACTIVE',
         ceAmountMultiplier: dto.ceAmountMultiplier ?? 1,
         peAmountMultiplier: dto.peAmountMultiplier ?? 1,
@@ -618,6 +619,7 @@ export class AutoStradleStrategyService {
     'profitBookingPercentage',
     'stoplossBookingPercentage',
     'otmDifference',
+    'underlyingDifference', // ⭐ NEW
     'status',
     'ltp',
     'ceAmountMultiplier',
@@ -667,6 +669,8 @@ export class AutoStradleStrategyService {
       profitBookingPercentage: dto.profitBookingPercentage,
       stoplossBookingPercentage: dto.stoplossBookingPercentage,
       otmDifference: dto.otmDifference,
+      underlyingDifference:
+        dto.underlyingDifference ?? current.underlyingDifference ?? 0, // ⭐ NEW
       status: dto.status || current.status,
       ltp: dto.ltp ?? current.ltp,
       ceAmountMultiplier:

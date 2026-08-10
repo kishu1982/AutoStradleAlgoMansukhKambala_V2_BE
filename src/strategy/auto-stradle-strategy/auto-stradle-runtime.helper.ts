@@ -183,6 +183,12 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
       const mainLtp = mainTick.lp;
       config.ltp = mainLtp;
 
+      // ⭐ NEW — apply manual future-vs-spot adjustment before strike derivation.
+      // Positive or negative, added once here so both CE and PE branch off the
+      // same adjusted underlying.
+      const underlyingDiff = config.underlyingDifference ?? 0;
+      const adjustedUnderlyingPrice = mainLtp + underlyingDiff;
+
       let isUpdated = false;
 
       // =====================================================
@@ -205,9 +211,17 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
       for (const leg of config.legsData || []) {
         if (!['NFO', 'BFO', 'MCX'].includes(leg.exch)) continue;
 
+        // const otmPercent = Math.abs(config.otmDifference || 0);
+        // const diff = otmPercent > 0 ? mainLtp * (otmPercent / 100) : 0;
+        // let strike = leg.optionType === 'PE' ? mainLtp - diff : mainLtp + diff;
+
         const otmPercent = Math.abs(config.otmDifference || 0);
-        const diff = otmPercent > 0 ? mainLtp * (otmPercent / 100) : 0;
-        let strike = leg.optionType === 'PE' ? mainLtp - diff : mainLtp + diff;
+        const diff =
+          otmPercent > 0 ? adjustedUnderlyingPrice * (otmPercent / 100) : 0; // ⭐ was mainLtp
+        let strike =
+          leg.optionType === 'PE'
+            ? adjustedUnderlyingPrice - diff
+            : adjustedUnderlyingPrice + diff; // ⭐ was mainLtp
 
         const matchedIndex = this.ensureIndexMasterEntry(config);
         const roundStep = matchedIndex?.roundStep ?? 100;

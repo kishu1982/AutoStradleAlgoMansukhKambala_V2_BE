@@ -67,6 +67,10 @@ export class AutoStradleDataEntity {
   @Column()
   otmDifference: number; // e.g., 0.25 (represents 0.25%) - MANDATORY, leg difference from main signal
 
+  // adding new field for underlying difference, can be positive or negative
+  @Column({ nullable: true })
+  underlyingDifference?: number;
+
   @Column({ nullable: true })
   status?: 'ACTIVE' | 'INACTIVE'; // Optional status field
 
