@@ -584,7 +584,8 @@ export class AutoStradleRMSService implements OnModuleInit {
 
       for (const t of tokenTrades) {
         // let qty = Number(t.raw.flqty || 0);
-        let qty = Number(t.raw.qty || 0); // as trade data api send cumilitive quantity
+        // let qty = Number(t.raw.qty || 0); // as trade data api send cumilitive quantity
+        let qty = Number(t.raw.flqty || 0); // as trade data api send cumilitive quantity
         const price = Number(t.raw.flprc || 0);
         const side = t.raw.trantype as 'B' | 'S';
 
