@@ -18,6 +18,8 @@ export class AutoStradleRMSService implements OnModuleInit {
   private underlyingIndex = new Map<string, any[]>();
   private priceMap = new Map<string, MarketTick>();
   private exitLocks = new Set<string>();
+  // for clearing or controling heep memory
+  private inFlightTokens = new Set<string>(); // ⭐ ADD — prevents tick pile-up
 
   // max order per second
   private readonly MAX_ORDERS_PER_SECOND = 10;
@@ -103,10 +105,28 @@ export class AutoStradleRMSService implements OnModuleInit {
       // this.logger.debug(`Tick received for key=${key}`);
 
       // ⭐ Merge tick safely
-      const updatedTick = this.mergeTickData(key, feed);
+      // const updatedTick = this.mergeTickData(key, feed);
+
+      // ⭐ Merge tick safely — always keep price data fresh
+      this.mergeTickData(key, feed);
 
       // ⭐ Process related straddles
-      void this.processConfigsForToken(key);
+      // void this.processConfigsForToken(key);
+
+      // ⭐ Skip if a previous tick for this token is still being processed —
+      // prevents unbounded concurrent async chains piling up during
+      // high-frequency market hours (this was the OOM cause)
+      if (this.inFlightTokens.has(key)) return;
+      this.inFlightTokens.add(key);
+
+      this.processConfigsForToken(key)
+        .catch((error) =>
+          this.logger.error(
+            'processConfigsForToken error',
+            error?.stack || error,
+          ),
+        )
+        .finally(() => this.inFlightTokens.delete(key));
     } catch (error) {
       this.logger.error('handleTick error', error?.stack || error);
     }
@@ -288,30 +308,31 @@ export class AutoStradleRMSService implements OnModuleInit {
   // =====================================================
   // SAVE JSON IF OPEN
   // =====================================================
-  private dirtyConfigs = new Map<string, any>();
-  private persistConfig(config: any) {
-    this.dirtyConfigs.set(String(config._id), config);
-  }
-  @Interval(1000)
-  async flushJsonFiles() {
-    if (this.dirtyConfigs.size === 0) return;
+  // private dirtyConfigs = new Map<string, any>();
+  // private pendingDeletes = new Set<string>(); // ⭐ ADD — batches file deletes
+  // private persistConfig(config: any) {
+  //   this.dirtyConfigs.set(String(config._id), config);
+  // }
+  // @Interval(1000)
+  // async flushJsonFiles() {
+  //   if (this.dirtyConfigs.size === 0) return;
 
-    const configs = [...this.dirtyConfigs.values()];
-    this.dirtyConfigs.clear();
+  //   const configs = [...this.dirtyConfigs.values()];
+  //   this.dirtyConfigs.clear();
 
-    await Promise.all(
-      configs.map(async (config) => {
-        // const file = path.join(this.SAVE_PATH, `${config._id}.json`);
-        // await fs.promises.writeFile(file, JSON.stringify(config, null, 2));
+  //   await Promise.all(
+  //     configs.map(async (config) => {
+  //       // const file = path.join(this.SAVE_PATH, `${config._id}.json`);
+  //       // await fs.promises.writeFile(file, JSON.stringify(config, null, 2));
 
-        const file = path.join(this.SAVE_PATH, `${config._id}.json`);
-        const tmpFile = `${file}.tmp`;
+  //       const file = path.join(this.SAVE_PATH, `${config._id}.json`);
+  //       const tmpFile = `${file}.tmp`;
 
-        await fs.promises.writeFile(tmpFile, JSON.stringify(config, null, 2));
-        await fs.promises.rename(tmpFile, file);
-      }),
-    );
-  }
+  //       await fs.promises.writeFile(tmpFile, JSON.stringify(config, null, 2));
+  //       await fs.promises.rename(tmpFile, file);
+  //     }),
+  //   );
+  // }
   // private persistConfig(config: any) {
   //   try {
   //     const file = path.join(this.SAVE_PATH, `${config._id}.json`);
@@ -327,17 +348,67 @@ export class AutoStradleRMSService implements OnModuleInit {
   // DELETE FILE IF CLOSED
   // =====================================================
 
-  private removeConfigFile(config: any) {
-    try {
-      const file = path.join(this.SAVE_PATH, `${config._id}.json`);
+  // private removeConfigFile(config: any) {
+  //   try {
+  //     const file = path.join(this.SAVE_PATH, `${config._id}.json`);
 
-      if (fs.existsSync(file)) {
-        fs.unlinkSync(file);
-        this.logger.log(`🧹 Removed closed trade file: ${config._id}`);
-      }
-    } catch (err) {
-      this.logger.error('removeConfigFile error', err?.stack || err);
+  //     if (fs.existsSync(file)) {
+  //       fs.unlinkSync(file);
+  //       this.logger.log(`🧹 Removed closed trade file: ${config._id}`);
+  //     }
+  //   } catch (err) {
+  //     this.logger.error('removeConfigFile error', err?.stack || err);
+  //   }
+  // }
+
+  // for fixing heap memory replacing with
+  private dirtyConfigs = new Map<string, any>();
+  private pendingDeletes = new Set<string>(); // ⭐ ADD — batches file deletes
+  private persistConfig(config: any) {
+    const id = String(config._id);
+    this.pendingDeletes.delete(id); // a fresh write cancels a pending delete
+    this.dirtyConfigs.set(id, config);
+  }
+
+  @Interval(1000)
+  async flushJsonFiles() {
+    if (this.dirtyConfigs.size > 0) {
+      const configs = [...this.dirtyConfigs.values()];
+      this.dirtyConfigs.clear();
+
+      await Promise.all(
+        configs.map(async (config) => {
+          const file = path.join(this.SAVE_PATH, `${config._id}.json`);
+          const tmpFile = `${file}.tmp`;
+
+          await fs.promises.writeFile(tmpFile, JSON.stringify(config, null, 2));
+          await fs.promises.rename(tmpFile, file);
+        }),
+      );
     }
+
+    if (this.pendingDeletes.size > 0) {
+      const ids = [...this.pendingDeletes.values()];
+      this.pendingDeletes.clear();
+
+      await Promise.all(
+        ids.map(async (id) => {
+          const file = path.join(this.SAVE_PATH, `${id}.json`);
+          try {
+            await fs.promises.rm(file, { force: true });
+            this.logger.log(`🧹 Removed closed trade file: ${id}`);
+          } catch (err) {
+            this.logger.error('removeConfigFile error', err?.stack || err);
+          }
+        }),
+      );
+    }
+  }
+
+  private removeConfigFile(config: any) {
+    const id = String(config._id);
+    this.dirtyConfigs.delete(id); // a pending write is now moot
+    this.pendingDeletes.add(id);
   }
 
   // =====================================================
