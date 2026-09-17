@@ -23,6 +23,12 @@ export class ExchangeDataService implements OnModuleInit {
   private tradeCache: any[] = [];
   private netPositionCache: any[] = [];
 
+  // process to control heap memory
+  private lastPositionSyncAt = 0;
+  private lastOrderSyncAt = 0;
+  private lastTradeSyncAt = 0;
+  private readonly MIN_SYNC_INTERVAL_MS = 500; // don't force more than 2 broker calls/sec
+
   // ⭐ three independent queues so a force-fetch of one resource
   // never waits behind an unrelated sync
   private orderSyncPromise: Promise<void> = Promise.resolve();
@@ -191,17 +197,49 @@ export class ExchangeDataService implements OnModuleInit {
   // (execution decisions, RMS exit checks, reconciliation, etc.)
   // --------------------------------
 
+  // // old getter without heap memory control
+  // async getNetPositions() {
+  //   await this.queue('position', () => this.syncNetPositions());
+  //   return this.netPositionCache;
+  // }
+
+  // async getOrders() {
+  //   await this.queue('order', () => this.syncOrderBook());
+  //   return this.orderCache;
+  // }
+
+  // async getTrades() {
+  //   await this.queue('trade', () => this.syncTradeBook());
+  //   return this.tradeCache;
+  // }
+
+  // with heap memory control
   async getNetPositions() {
+    const now = Date.now();
+    if (now - this.lastPositionSyncAt < this.MIN_SYNC_INTERVAL_MS) {
+      return this.netPositionCache; // synced recently enough — don't stampede the broker
+    }
+    this.lastPositionSyncAt = now;
     await this.queue('position', () => this.syncNetPositions());
     return this.netPositionCache;
   }
 
   async getOrders() {
+    const now = Date.now();
+    if (now - this.lastOrderSyncAt < this.MIN_SYNC_INTERVAL_MS) {
+      return this.orderCache;
+    }
+    this.lastOrderSyncAt = now;
     await this.queue('order', () => this.syncOrderBook());
     return this.orderCache;
   }
 
   async getTrades() {
+    const now = Date.now();
+    if (now - this.lastTradeSyncAt < this.MIN_SYNC_INTERVAL_MS) {
+      return this.tradeCache;
+    }
+    this.lastTradeSyncAt = now;
     await this.queue('trade', () => this.syncTradeBook());
     return this.tradeCache;
   }
