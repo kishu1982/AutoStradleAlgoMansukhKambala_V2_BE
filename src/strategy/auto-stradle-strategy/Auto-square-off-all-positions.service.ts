@@ -163,7 +163,10 @@ export class AutoSquareOffAllPositionsService {
     // Fetch the freshest snapshot right before deciding — always pull
     // required fields (netqty, side, lp, ti) straight from this, never
     // from a value carried over between ticks.
-    const currentPositions = await this.exchangeDataService.getNetPositions();
+    // const currentPositions = await this.exchangeDataService.getNetPositions();
+    const currentPositions =
+      await this.exchangeDataService.forceNetPositionSync();
+
     const livePos = this.findPosition(
       currentPositions,
       token,

@@ -217,7 +217,7 @@ export class ExchangeDataService implements OnModuleInit {
   async getNetPositions() {
     const now = Date.now();
     if (now - this.lastPositionSyncAt < this.MIN_SYNC_INTERVAL_MS) {
-      return this.netPositionCache; // synced recently enough — don't stampede the broker
+      return this.netPositionCache;
     }
     this.lastPositionSyncAt = now;
     await this.queue('position', () => this.syncNetPositions());

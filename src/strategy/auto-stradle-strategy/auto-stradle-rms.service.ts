@@ -2201,7 +2201,9 @@ Place exit again
     while (Date.now() - start < maxWaitMs) {
       await new Promise((res) => setTimeout(res, interval));
 
-      const netPositions = await this.exchangeDataService.getNetPositions();
+      // const netPositions = await this.exchangeDataService.getNetPositions();
+      const netPositions =
+        await this.exchangeDataService.forceNetPositionSync();
 
       const newNetA = this.getNetPositionQty(
         netPositions,
