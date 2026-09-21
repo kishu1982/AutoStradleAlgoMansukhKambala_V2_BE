@@ -639,9 +639,10 @@ export class AutoStradleRMSService implements OnModuleInit {
       const cacheKey = `${leg.exch}|${leg.tokenNumber}`;
       const cached = this.avgPriceCache.get(cacheKey);
       if (cached && cached.trades === trades) {
-        return cached.avg;
+        return cached.avg; // return cached avg if no change is in file size or file
       }
 
+      // if changes found as per recorde cache. now go to do further process
       const parseTm = (str: string) => {
         const [datePart, timePart] = str.split(' ');
         const [dd, mm, yyyy] = datePart.split('-');
