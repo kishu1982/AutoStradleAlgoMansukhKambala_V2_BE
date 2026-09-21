@@ -43,6 +43,8 @@ export class AutoStradleRMSService implements OnModuleInit {
   private readonly stabilityWindowMs: number; // ⭐ ADD
   private readonly stepLots: number; // ⭐ For ratio
 
+  private avgPriceCache = new Map<string, { trades: any[]; avg: number }>(); // for heapmemory caustion
+
   constructor(
     private readonly autoStradleService: AutoStradleStrategyService,
     private readonly exchangeDataService: ExchangeDataService,
@@ -631,6 +633,15 @@ export class AutoStradleRMSService implements OnModuleInit {
     try {
       if (!netQty || !trades?.length) return 0;
 
+      // ⭐ ADD — skip the full filter/sort/FIFO walk if this leg's trades
+      // haven't changed since we last computed it (cache updates every 2s,
+      // ticks fire far more often than that)
+      const cacheKey = `${leg.exch}|${leg.tokenNumber}`;
+      const cached = this.avgPriceCache.get(cacheKey);
+      if (cached && cached.trades === trades) {
+        return cached.avg;
+      }
+
       const parseTm = (str: string) => {
         const [datePart, timePart] = str.split(' ');
         const [dd, mm, yyyy] = datePart.split('-');
@@ -701,7 +712,14 @@ export class AutoStradleRMSService implements OnModuleInit {
         totalValue += lot.qty * lot.price;
       }
 
-      return totalQty ? totalValue / totalQty : 0;
+      // return totalQty ? totalValue / totalQty : 0;
+      // instead returning avg
+      const avg = totalQty ? totalValue / totalQty : 0;
+
+      // ⭐ ADD — store before returning
+      this.avgPriceCache.set(cacheKey, { trades, avg });
+
+      return avg;
     } catch (error) {
       this.logger.error('getAvgPriceFromTrades error', error);
       return 0;
