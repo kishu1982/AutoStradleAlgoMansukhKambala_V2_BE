@@ -101,6 +101,11 @@ export class CreateAutoStradleStrategyDto {
   exitRatio?: number; // default 1.75 if not provided
 
   @IsOptional()
+  @IsNumber()
+  @Min(0, { message: 'vwapTriggerPercentage cannot be negative' })
+  vwapTriggerPercentage?: number; // e.g. 0.50 represents 0.50%
+
+  @IsOptional()
   @Transform(({ value }) => value ?? 0)
   @IsNumber({}, { message: 'underlyingDifference must be a number' })
   underlyingDifference?: number = 0;

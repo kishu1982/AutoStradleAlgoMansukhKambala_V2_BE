@@ -87,6 +87,16 @@ export class AutoStradleDataEntity {
   @Column({ type: 'number', default: 1.75 })
   exitRatio: number;
 
+  // VWAP support
+  @Column({ type: 'number', nullable: true })
+  vwapValue?: number; // backend-only, auto-updated ~every 1 min from getQuotes().ap (or lp fallback)
+
+  @Column({ type: 'number', nullable: true })
+  vwapTriggerPercentage?: number; // user-set, e.g. 0.50 means 0.50%
+
+  @Column({ type: 'date', nullable: true })
+  vwapUpdatedAt?: Date; // useful for staleness checks/debugging
+
   // timestamps for record keeping
   @CreateDateColumn()
   createdAt: Date;

@@ -86,6 +86,7 @@ export class AutoStradleStrategyService {
         ceAmountMultiplier: dto.ceAmountMultiplier ?? 1,
         peAmountMultiplier: dto.peAmountMultiplier ?? 1,
         exitRatio: dto.exitRatio ?? 1.75,
+        vwapTriggerPercentage: dto.vwapTriggerPercentage ?? 0.5, // ⭐ ADD THIS LINE
       });
 
       const savedConfig = await this.autoStradleRepo.save(newConfig);
@@ -625,6 +626,7 @@ export class AutoStradleStrategyService {
     'ceAmountMultiplier',
     'peAmountMultiplier',
     'exitRatio',
+    'vwapTriggerPercentage', // ⭐ NEW
   ] as const;
 
   /**
@@ -678,6 +680,8 @@ export class AutoStradleStrategyService {
       peAmountMultiplier:
         dto.peAmountMultiplier ?? current.peAmountMultiplier ?? 1,
       exitRatio: dto.exitRatio ?? current.exitRatio ?? 1.75,
+      vwapTriggerPercentage:
+        dto.vwapTriggerPercentage ?? current.vwapTriggerPercentage ?? 0.5, // was ?? 0
     };
   }
   /**
@@ -741,5 +745,28 @@ export class AutoStradleStrategyService {
 
   private unlockConfig(id: string): void {
     this.configLocks.delete(id);
+  }
+
+  /**
+   * Backend-only VWAP write. Never exposed via DTO/API — called only by
+   * VwapCacheService once a minute.
+   */
+  async updateVwapValue(id: string, vwapValue: number): Promise<void> {
+    try {
+      if (!ObjectId.isValid(id)) return;
+      const config = await this.autoStradleRepo.findOne({
+        where: { _id: new ObjectId(id) },
+      });
+      if (!config) return;
+
+      config.vwapValue = vwapValue;
+      config.vwapUpdatedAt = new Date();
+      await this.autoStradleRepo.save(config);
+    } catch (error) {
+      this.logger.error(
+        `[UPDATE_VWAP] error for ID ${id}`,
+        error?.stack || error,
+      );
+    }
   }
 }

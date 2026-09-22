@@ -112,6 +112,10 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
       const token = feed?.tk;
       if (!exchange || !token) return;
 
+      // this.logger.debug(
+      //   `average trade price on feed for Token : ${feed.tk} is : ${feed.ap} HIGH: ${feed.h} LOW : ${feed.l} `,
+      // );
+
       const key = `${exchange}|${token}`;
       let existing = this.marketDataMap.get(key);
 
@@ -650,24 +654,61 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
   // =====================================================
   // GET EFFECTIVE AMOUNT FOR LEG BASED ON CE/PE MULTIPLIER
   // =====================================================
+
+  //wihtout vwap trigger
+  // private getEffectiveAmountForLeg(
+  //   config: AutoStradleDataEntity,
+  //   leg: any,
+  // ): number {
+  //   try {
+  //     const baseAmount = config.amountForLotCalEachLeg;
+
+  //     if (!baseAmount) return baseAmount;
+
+  //     const ceMultiplier = config.ceAmountMultiplier ?? 1;
+  //     const peMultiplier = config.peAmountMultiplier ?? 1;
+
+  //     const multiplier =
+  //       leg.optionType === 'CE'
+  //         ? ceMultiplier
+  //         : leg.optionType === 'PE'
+  //           ? peMultiplier
+  //           : 1; // fallback for FUTIDX or unexpected types — no multiplier applied
+
+  //     return baseAmount * multiplier;
+  //   } catch (error) {
+  //     this.logger.error(
+  //       `getEffectiveAmountForLeg error`,
+  //       error?.stack || error,
+  //     );
+  //     return config.amountForLotCalEachLeg;
+  //   }
+  // }
+
+  // with vwap trigger
   private getEffectiveAmountForLeg(
     config: AutoStradleDataEntity,
     leg: any,
   ): number {
     try {
       const baseAmount = config.amountForLotCalEachLeg;
-
       if (!baseAmount) return baseAmount;
 
-      const ceMultiplier = config.ceAmountMultiplier ?? 1;
-      const peMultiplier = config.peAmountMultiplier ?? 1;
+      const withinTriggerBandUseOne = this.shouldForceMultiplierToOne(config);
+
+      const ceMultiplier = withinTriggerBandUseOne
+        ? 1
+        : (config.ceAmountMultiplier ?? 1);
+      const peMultiplier = withinTriggerBandUseOne
+        ? 1
+        : (config.peAmountMultiplier ?? 1);
 
       const multiplier =
         leg.optionType === 'CE'
           ? ceMultiplier
           : leg.optionType === 'PE'
             ? peMultiplier
-            : 1; // fallback for FUTIDX or unexpected types — no multiplier applied
+            : 1;
 
       return baseAmount * multiplier;
     } catch (error) {
@@ -677,6 +718,33 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
       );
       return config.amountForLotCalEachLeg;
     }
+  }
+
+  // =====================================================
+  // VWAP TRIGGER BAND CHECK
+  // Returns true when the underlying is INSIDE the vwap±trigger% band,
+  // meaning both multipliers should be forced to 1 instead of the
+  // configured ceAmountMultiplier/peAmountMultiplier.
+  // If vwap or the trigger % aren't set, the feature is a no-op and the
+  // configured multipliers are always used (existing behavior preserved).
+  // =====================================================
+  private shouldForceMultiplierToOne(config: AutoStradleDataEntity): boolean {
+    const vwap = config.vwapValue;
+    const triggerPct = config.vwapTriggerPercentage ?? 0.5;
+    const underlyingLtp = config.ltp;
+
+    if (!vwap || !triggerPct || underlyingLtp === undefined) {
+      return false; // feature not configured — behave exactly as before
+    }
+
+    const triggerAmount = vwap * (triggerPct / 100);
+    const upperBound = vwap + triggerAmount;
+    const lowerBound = vwap - triggerAmount;
+
+    const isOutsideBand =
+      underlyingLtp > upperBound || underlyingLtp < lowerBound;
+
+    return !isOutsideBand; // outside band → use configured multipliers; inside → force 1
   }
 
   // =====================================================

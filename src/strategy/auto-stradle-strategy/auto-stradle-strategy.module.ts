@@ -14,6 +14,7 @@ import { AutoStradleRMSService } from './auto-stradle-rms.service';
 import { TelegramModule } from 'src/telegram/telegram.module';
 import { AutoSquareOffService } from './auto-square-off.service';
 import { AutoSquareOffAllPositionsService } from './Auto-square-off-all-positions.service';
+import { VwapCacheService } from './vwap-cache.service';
 
 @Module({
   imports: [
@@ -32,6 +33,7 @@ import { AutoSquareOffAllPositionsService } from './Auto-square-off-all-position
     AutoStradleRMSService, // ⭐ ADD THIS
     AutoSquareOffService,
     AutoSquareOffAllPositionsService, // ⭐ ADD THIS
+    VwapCacheService, // ⭐ NEW
   ],
   exports: [AutoStradleStrategyService, AutoStradleRuntimeHelper],
 })
