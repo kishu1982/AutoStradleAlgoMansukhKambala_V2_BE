@@ -769,4 +769,19 @@ export class AutoStradleStrategyService {
       );
     }
   }
+
+  /**
+   * Backend-only write of underlyingDifference. Uses an atomic $set so no
+   * other field on the document is touched.
+   */
+  async updateUnderlyingDifference(
+    id: string,
+    underlyingDifference: number,
+  ): Promise<void> {
+    if (!ObjectId.isValid(id)) return;
+    await this.autoStradleRepo.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: { underlyingDifference } },
+    );
+  }
 }
