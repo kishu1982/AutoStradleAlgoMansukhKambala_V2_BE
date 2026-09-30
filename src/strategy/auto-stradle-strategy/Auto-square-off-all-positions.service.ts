@@ -1,6 +1,7 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ExchangeDataService } from '../exchange-data/exchange-data.service';
 import { OrdersService } from 'src/orders/orders.service';
+import { ConfigService } from '@nestjs/config';
 
 /*
 =====================================================================
@@ -36,6 +37,9 @@ Flow:
 =====================================================================
 */
 
+// adding alias
+type ProductType = 'I' | 'C' | 'M' | 'H';
+
 @Injectable()
 export class AutoSquareOffAllPositionsService {
   private readonly logger = new Logger(AutoSquareOffAllPositionsService.name);
@@ -51,10 +55,37 @@ export class AutoSquareOffAllPositionsService {
   // retry loop on the SAME position, resulting in duplicate/excess orders.
   private isRunning = false;
 
+  // ⭐ NEW — configurable via .env
+  private maxLotsPerOrder = 10;
+  private splitExchanges = new Set<string>(['NFO', 'BFO', 'MCX']);
+  private readonly BATCH_GAP_MS = 150; // small pause between batches
+
   constructor(
     private readonly exchangeDataService: ExchangeDataService,
     private readonly ordersService: OrdersService,
+    private readonly configService: ConfigService, // ⭐ NEW
   ) {}
+
+  onModuleInit() {
+    const rawMax = Number(
+      this.configService.get('AUTO_SQUARE_OFF_MAX_LOTS_PER_ORDER', '10'),
+    );
+    this.maxLotsPerOrder = Number.isInteger(rawMax) && rawMax > 0 ? rawMax : 10;
+
+    const rawEx = String(
+      this.configService.get('AUTO_SQUARE_OFF_SPLIT_EXCHANGES', 'NFO,BFO,MCX'),
+    );
+    this.splitExchanges = new Set(
+      rawEx
+        .split(',')
+        .map((s) => s.trim().toUpperCase())
+        .filter(Boolean),
+    );
+
+    this.logger.log(
+      `AutoSquareOffAllPositions init | maxLotsPerOrder=${this.maxLotsPerOrder} | splitExchanges=[${[...this.splitExchanges].join(', ')}]`,
+    );
+  }
 
   // =====================================================
   // PUBLIC ENTRY POINT
@@ -149,7 +180,8 @@ export class AutoSquareOffAllPositionsService {
     const tradingsymbol = pos.raw?.tsym;
     const exchange = pos.raw?.exch;
     const token = pos.raw?.token ?? pos.token;
-    const productType = pos.raw?.prd || 'I';
+    // const productType = pos.raw?.prd || 'I';
+    const productType: ProductType = (pos.raw?.prd || 'I') as ProductType;
 
     if (!tradingsymbol || !exchange || !token) {
       this.logger.error(
@@ -183,7 +215,9 @@ export class AutoSquareOffAllPositionsService {
     }
 
     const side: 'B' | 'S' = netQty > 0 ? 'S' : 'B';
-    const qty = Math.abs(netQty);
+    // const qty = Math.abs(netQty);
+    const totalQty = Math.abs(netQty);
+    const lotSize = Number(livePos?.raw?.ls || 0); // ⭐ from the FRESH snapshot
 
     // Build a LMT price from the position's own lp/ti fields — this
     // broker rejects MKT orders on the NSE/BSE equity (cash) segment
@@ -197,44 +231,74 @@ export class AutoSquareOffAllPositionsService {
       return 'SKIPPED';
     }
 
+    const batches = this.buildQtyBatches(
+      totalQty,
+      lotSize,
+      exchange,
+      tradingsymbol,
+    );
+
+    // this.logger.warn(
+    //   `[ALL POSITIONS] Closing ${tradingsymbol} (${exchange}) qty=${qty} side=${side} lmtPrice=${lmtPrice}`,
+    // );
     this.logger.warn(
-      `[ALL POSITIONS] Closing ${tradingsymbol} (${exchange}) qty=${qty} side=${side} lmtPrice=${lmtPrice}`,
+      `[ALL POSITIONS] Closing ${tradingsymbol} (${exchange}) totalQty=${totalQty} ls=${lotSize} lots=${lotSize > 0 ? totalQty / lotSize : 'n/a'} side=${side} lmtPrice=${lmtPrice} | batches=[${batches.join(', ')}]`,
     );
 
     try {
-      await this.throttleOrders(1);
+      // new way to close in batchs
+      for (let i = 0; i < batches.length; i++) {
+        await this.placeOneCloseOrder({
+          side,
+          productType,
+          exchange,
+          tradingsymbol,
+          qty: batches[i],
+          lmtPrice,
+          reason,
+          label: `${i + 1}/${batches.length}`,
+        });
 
-      const orderRes = await this.ordersService.placeOrder({
-        buy_or_sell: side,
-        product_type: productType,
-        exchange,
-        tradingsymbol,
-        quantity: qty,
-        price_type: 'LMT',
-        price: lmtPrice,
-        trigger_price: 0,
-        discloseqty: 0,
-        retention: 'IOC',
-        amo: 'NO',
-        remarks: `AUTO_SQUARE_OFF_ALL_POSITIONS (${reason})`,
-      });
-
-      // Broker APIs like Shoonya/Finvasia typically DON'T throw on a
-      // rejected order — they return HTTP 200 with { stat: 'Not_Ok', emsg }.
-      const stat = (orderRes as any)?.stat;
-      if (stat && String(stat).toLowerCase() !== 'ok') {
-        this.logger.error(
-          `[ALL POSITIONS] Broker REJECTED order for ${tradingsymbol} (${exchange}) prd=${productType} | response=${JSON.stringify(
-            orderRes,
-          )}`,
-        );
-      } else {
-        this.logger.debug(
-          `[ALL POSITIONS] Order accepted for ${tradingsymbol} | response=${JSON.stringify(
-            orderRes,
-          )}`,
-        );
+        if (i < batches.length - 1) await this.sleep(this.BATCH_GAP_MS);
       }
+
+      // Batches sum EXACTLY to the fresh netQty, so there's no overshoot risk.
+      // Anything rejected or partially filled is re-read on the next 5s tick.
+      return 'ORDER_PLACED';
+      // old way to close complete quanitity
+      // await this.throttleOrders(1);
+
+      // const orderRes = await this.ordersService.placeOrder({
+      //   buy_or_sell: side,
+      //   product_type: productType,
+      //   exchange,
+      //   tradingsymbol,
+      //   quantity: qty,
+      //   price_type: 'LMT',
+      //   price: lmtPrice,
+      //   trigger_price: 0,
+      //   discloseqty: 0,
+      //   retention: 'IOC',
+      //   amo: 'NO',
+      //   remarks: `AUTO_SQUARE_OFF_ALL_POSITIONS (${reason})`,
+      // });
+
+      // // Broker APIs like Shoonya/Finvasia typically DON'T throw on a
+      // // rejected order — they return HTTP 200 with { stat: 'Not_Ok', emsg }.
+      // const stat = (orderRes as any)?.stat;
+      // if (stat && String(stat).toLowerCase() !== 'ok') {
+      //   this.logger.error(
+      //     `[ALL POSITIONS] Broker REJECTED order for ${tradingsymbol} (${exchange}) prd=${productType} | response=${JSON.stringify(
+      //       orderRes,
+      //     )}`,
+      //   );
+      // } else {
+      //   this.logger.debug(
+      //     `[ALL POSITIONS] Order accepted for ${tradingsymbol} | response=${JSON.stringify(
+      //       orderRes,
+      //     )}`,
+      //   );
+      // }
     } catch (err) {
       this.logger.error(
         `[ALL POSITIONS] placeOrder threw for ${tradingsymbol}`,
@@ -322,5 +386,104 @@ export class AutoSquareOffAllPositionsService {
 
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  //BAtch building
+  // Splits totalQty into chunks of at most (maxLotsPerOrder × lotSize).
+  // e.g. qty=975, ls=65, maxLots=10 → [650, 325]
+  private buildQtyBatches(
+    totalQty: number,
+    lotSize: number,
+    exchange: string,
+    tradingsymbol: string,
+  ): number[] {
+    if (!this.splitExchanges.has(String(exchange).toUpperCase())) {
+      return [totalQty]; // e.g. NSE/BSE equity: no lot concept, send as-is
+    }
+
+    if (!Number.isFinite(lotSize) || lotSize <= 0) {
+      this.logger.error(
+        `[ALL POSITIONS] Invalid lot size (ls=${lotSize}) for ${tradingsymbol} — cannot split, sending single order`,
+      );
+      return [totalQty];
+    }
+
+    if (totalQty % lotSize !== 0) {
+      this.logger.warn(
+        `[ALL POSITIONS] ${tradingsymbol}: qty ${totalQty} is not a multiple of lot size ${lotSize} — last batch will carry the remainder`,
+      );
+    }
+
+    const maxQty = this.maxLotsPerOrder * lotSize;
+    const batches: number[] = [];
+    let remaining = totalQty;
+
+    while (remaining > 0) {
+      const q = Math.min(remaining, maxQty);
+      batches.push(q);
+      remaining -= q;
+    }
+    return batches;
+  }
+
+  // Single-order helper (new method) to close trade in batches
+  private async placeOneCloseOrder(args: {
+    side: 'B' | 'S';
+    productType: ProductType; // ⭐ was: string
+    exchange: string;
+    tradingsymbol: string;
+    qty: number;
+    lmtPrice: number;
+    reason: string;
+    label: string; // e.g. "2/3"
+  }): Promise<boolean> {
+    const {
+      side,
+      productType,
+      exchange,
+      tradingsymbol,
+      qty,
+      lmtPrice,
+      reason,
+      label,
+    } = args;
+
+    try {
+      await this.throttleOrders(1);
+
+      const orderRes = await this.ordersService.placeOrder({
+        buy_or_sell: side,
+        product_type: productType,
+        exchange,
+        tradingsymbol,
+        quantity: qty,
+        price_type: 'LMT',
+        price: lmtPrice,
+        trigger_price: 0,
+        discloseqty: 0,
+        retention: 'IOC',
+        amo: 'NO',
+        remarks: `AUTO_SQUARE_OFF_ALL_POSITIONS (${reason})`,
+      });
+
+      const stat = (orderRes as any)?.stat;
+      if (stat && String(stat).toLowerCase() !== 'ok') {
+        this.logger.error(
+          `[ALL POSITIONS] Broker REJECTED batch ${label} for ${tradingsymbol} qty=${qty} | response=${JSON.stringify(orderRes)}`,
+        );
+        return false;
+      }
+
+      this.logger.debug(
+        `[ALL POSITIONS] Batch ${label} accepted for ${tradingsymbol} qty=${qty} | response=${JSON.stringify(orderRes)}`,
+      );
+      return true;
+    } catch (err) {
+      this.logger.error(
+        `[ALL POSITIONS] placeOrder threw for ${tradingsymbol} batch ${label}`,
+        err?.stack || err,
+      );
+      return false;
+    }
   }
 }
