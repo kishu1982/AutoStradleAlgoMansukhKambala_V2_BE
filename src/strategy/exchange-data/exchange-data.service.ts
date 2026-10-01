@@ -23,6 +23,8 @@ export class ExchangeDataService implements OnModuleInit {
   private tradeCache: any[] = [];
   private netPositionCache: any[] = [];
 
+  private lastCleanupDate = '';
+
   // process to control heap memory
   private lastPositionSyncAt = 0;
   private lastOrderSyncAt = 0;
@@ -68,6 +70,8 @@ export class ExchangeDataService implements OnModuleInit {
     try {
       this.logger.log('ExchangeDataService initialized');
 
+      await this.cleanupStaleOrdersAndTrades(); // catches up after restarts/downtime
+
       await Promise.all([
         this.queue('order', () => this.syncOrderBook()),
         this.queue('trade', () => this.syncTradeBook()),
@@ -76,6 +80,17 @@ export class ExchangeDataService implements OnModuleInit {
     } catch (err) {
       this.logger.error('Module init failed', err?.stack || err);
     }
+  }
+
+  // clean up midnight stale orders/trades (from previous days) — this is a backup in case the daily cleanup didn't run for some reason
+  @Cron('0 0 * * *', { timeZone: 'Asia/Kolkata' })
+  async cleanupMidnight() {
+    await this.cleanupStaleOrdersAndTrades();
+  }
+  // and before market open
+  @Cron('0 30 8 * * 1-5', { timeZone: 'Asia/Kolkata' }) // before market open, safety net
+  async cleanupPreMarket() {
+    await this.cleanupStaleOrdersAndTrades();
   }
 
   // --------------------------------
@@ -160,15 +175,19 @@ export class ExchangeDataService implements OnModuleInit {
 
   @Cron('0 0 * * *') // midnight server time — adjust if you need IST specifically
   async cleanupStaleOrdersAndTrades() {
-    try {
-      const today = new Date().toISOString().split('T')[0];
+    const today = this.todayIST();
+    if (this.lastCleanupDate === today) return; // already done today
 
-      await Promise.all([
+    try {
+      const [o, t] = await Promise.all([
         this.orderRepo.deleteMany({ tradeDate: { $ne: today } as any }),
         this.tradeRepo.deleteMany({ tradeDate: { $ne: today } as any }),
       ]);
 
-      this.logger.log('Daily cleanup of stale orders/trades complete');
+      this.lastCleanupDate = today;
+      this.logger.log(
+        `Cleanup done. Deleted orders: ${o?.deletedCount ?? 0}, trades: ${t?.deletedCount ?? 0}`,
+      );
     } catch (err) {
       this.logger.error(
         'cleanupStaleOrdersAndTrades failed',
@@ -176,11 +195,28 @@ export class ExchangeDataService implements OnModuleInit {
       );
     }
   }
+  // @Cron('0 0 * * *') // midnight server time — adjust if you need IST specifically
+  // async cleanupStaleOrdersAndTrades() {
+  //   try {
+  //     const today = new Date().toISOString().split('T')[0];
+
+  //     await Promise.all([
+  //       this.orderRepo.deleteMany({ tradeDate: { $ne: today } as any }),
+  //       this.tradeRepo.deleteMany({ tradeDate: { $ne: today } as any }),
+  //     ]);
+
+  //     this.logger.log('Daily cleanup of stale orders/trades complete');
+  //   } catch (err) {
+  //     this.logger.error(
+  //       'cleanupStaleOrdersAndTrades failed',
+  //       err?.stack || err,
+  //     );
+  //   }
+  // }
 
   // --------------------------------
   // CACHE LOADER (used only if you ever need to hydrate from DB, e.g. after a restart)
   // --------------------------------
-
   async loadAllCachesFromDB() {
     try {
       this.orderCache = await this.orderRepo.find();
@@ -343,9 +379,26 @@ export class ExchangeDataService implements OnModuleInit {
   }
 
   // retry until broker reflects a non-zero position, or give up after maxRetry
+  // async waitForFreshNetPositions(maxRetry = 3) {
+  //   for (let i = 1; i <= maxRetry; i++) {
+  //     const positions = await this.getNetPositions();
+
+  //     const hasLivePosition = positions.some(
+  //       (p) => Number(p.raw?.netqty ?? 0) !== 0,
+  //     );
+
+  //     if (hasLivePosition) {
+  //       return positions;
+  //     }
+
+  //     await new Promise((resolve) => setTimeout(resolve, 200));
+  //   }
+
+  //   return this.getNetPositions();
+  // }
   async waitForFreshNetPositions(maxRetry = 3) {
     for (let i = 1; i <= maxRetry; i++) {
-      const positions = await this.getNetPositions();
+      const positions = await this.forceNetPositionSync();
 
       const hasLivePosition = positions.some(
         (p) => Number(p.raw?.netqty ?? 0) !== 0,
@@ -358,7 +411,7 @@ export class ExchangeDataService implements OnModuleInit {
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
 
-    return this.getNetPositions();
+    return this.forceNetPositionSync();
   }
 
   private async syncCollection(repo: MongoRepository<any>, trades: any[]) {
@@ -437,8 +490,19 @@ export class ExchangeDataService implements OnModuleInit {
   // kept as a thin explicit wrapper — same as calling getNetPositions(),
   // provided for readability at call sites that want to be explicit
   // about "force a fresh sync" intent
+  // async forceNetPositionSync() {
+  //   await this.queue('position', () => this.syncNetPositions());
+  //   return this.netPositionCache;
+  // }
   async forceNetPositionSync() {
+    this.lastPositionSyncAt = Date.now();
     await this.queue('position', () => this.syncNetPositions());
     return this.netPositionCache;
+  }
+
+  private todayIST(): string {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Kolkata',
+    }).format(new Date()); // YYYY-MM-DD
   }
 }
