@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Cron } from '@nestjs/schedule';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { ConfigService } from '@nestjs/config';
 import * as fs from 'fs';
 import * as path from 'path'; // ⭐ adjust path if different
@@ -92,7 +92,9 @@ export class AutoStradleUnderlyingDiffService {
   // =====================================================
   // CRON — every 5 minutes
   // =====================================================
-  @Cron('0 */5 * * * *')
+  // @Cron('0 */5 * * * *')
+  // CRON — every 10 seconds
+  @Cron(CronExpression.EVERY_10_SECONDS)
   async scheduledRun(): Promise<void> {
     if (!this.isAutoUpdateEnabled()) return;
     if (!this.isMarketOpenIST()) return;
@@ -111,39 +113,81 @@ export class AutoStradleUnderlyingDiffService {
       this.loadInstrumentsIfChanged();
       const configs = await this.strategyService.findAll();
 
-      for (const u of this.UNDERLYINGS) {
-        try {
-          const r = await this.computeForUnderlying(u);
-          results.push(r);
+      // old way to update underlyingDifference for all active configs, but it was too slow and caused timeouts
+      // for (const u of this.UNDERLYINGS) {
+      //   try {
+      //     const r = await this.computeForUnderlying(u);
+      //     results.push(r);
 
-          this.logger.log(
-            `${r.name}: spot=${r.spot} expiry=${r.expiry} ATM=${r.atmStrike} ` +
-              `CE=${r.callPremium} PE=${r.putPremium} synthFut=${r.syntheticFuture} diff=${r.difference}`,
-          );
+      //     this.logger.log(
+      //       `${r.name}: spot=${r.spot} expiry=${r.expiry} ATM=${r.atmStrike} ` +
+      //         `CE=${r.callPremium} PE=${r.putPremium} synthFut=${r.syntheticFuture} diff=${r.difference}`,
+      //     );
 
-          const matching = configs.filter(
-            (c) =>
-              c.exchange === u.spotExchange &&
-              String(c.tokenNumber) === u.spotToken,
-          );
+      //     const matching = configs.filter(
+      //       (c) =>
+      //         c.exchange === u.spotExchange &&
+      //         String(c.tokenNumber) === u.spotToken,
+      //     );
 
-          for (const c of matching) {
-            if (c.underlyingDifference === r.difference) continue; // no change, skip write
-            await this.strategyService.updateUnderlyingDifference(
-              c._id.toString(),
-              r.difference,
+      //     for (const c of matching) {
+      //       if (c.underlyingDifference === r.difference) continue; // no change, skip write
+      //       await this.strategyService.updateUnderlyingDifference(
+      //         c._id.toString(),
+      //         r.difference,
+      //       );
+      //       this.logger.log(
+      //         `Updated underlyingDifference for ${c.strategyName} (${c._id}) -> ${r.difference}`,
+      //       );
+      //     }
+      //   } catch (err: any) {
+      //     // one underlying failing must not block the others
+      //     this.logger.error(
+      //       `Synthetic future calc failed for ${u.name}: ${err?.message || err}`,
+      //     );
+      //   }
+      // }
+
+      // mew way to update underlying
+      await Promise.all(
+        this.UNDERLYINGS.map(async (u) => {
+          try {
+            const r = await this.computeForUnderlying(u);
+            results.push(r);
+
+            this.logger.debug(
+              `${r.name}: spot=${r.spot} expiry=${r.expiry} ATM=${r.atmStrike} ` +
+                `CE=${r.callPremium} PE=${r.putPremium} synthFut=${r.syntheticFuture} diff=${r.difference}`,
             );
-            this.logger.log(
-              `Updated underlyingDifference for ${c.strategyName} (${c._id}) -> ${r.difference}`,
+
+            const matching = configs.filter(
+              (c) =>
+                c.exchange === u.spotExchange &&
+                String(c.tokenNumber) === u.spotToken,
+            );
+
+            for (const c of matching) {
+              // TEMP DEBUG: remove after the issue is found
+              this.logger.debug(
+                `${u.name} ${c.strategyName}: stored=${c.underlyingDifference} computed=${r.difference}`,
+              );
+
+              if (c.underlyingDifference === r.difference) continue;
+              await this.strategyService.updateUnderlyingDifference(
+                c._id.toString(),
+                r.difference,
+              );
+              this.logger.log(
+                `Updated underlyingDifference ${c.strategyName}: ${c.underlyingDifference} -> ${r.difference}`,
+              );
+            }
+          } catch (err: any) {
+            this.logger.error(
+              `Synthetic future calc failed for ${u.name}: ${err?.message || err}`,
             );
           }
-        } catch (err: any) {
-          // one underlying failing must not block the others
-          this.logger.error(
-            `Synthetic future calc failed for ${u.name}: ${err?.message || err}`,
-          );
-        }
-      }
+        }),
+      );
     } catch (err: any) {
       this.logger.error(`runOnce error`, err?.stack || err);
     } finally {
@@ -284,12 +328,27 @@ export class AutoStradleUnderlyingDiffService {
   }
 
   /** lp if valid, else mid of best bid/ask */
+  // private extractPrice(q: any): number | undefined {
+  //   const lp = Number(q?.lp);
+  //   if (lp > 0) return lp;
+  //   const bid = Number(q?.bp1);
+  //   const ask = Number(q?.sp1);
+  //   if (bid > 0 && ask > 0) return (bid + ask) / 2;
+  //   return undefined;
+  // }
+  /** mid of bid/ask when spread is tight (fresher), else lp, else any valid mid */
   private extractPrice(q: any): number | undefined {
     const lp = Number(q?.lp);
-    if (lp > 0) return lp;
     const bid = Number(q?.bp1);
     const ask = Number(q?.sp1);
-    if (bid > 0 && ask > 0) return (bid + ask) / 2;
+
+    if (bid > 0 && ask > 0) {
+      const mid = (bid + ask) / 2;
+      if ((ask - bid) / mid < 0.03) return mid; // tight spread: mid beats a stale lp
+      if (lp > 0) return lp;
+      return mid;
+    }
+    if (lp > 0) return lp;
     return undefined;
   }
 
