@@ -200,13 +200,91 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
       // (no mutation yet — needed so we can compare across legs
       // before deciding on the cap adjustment)
       // =====================================================
+      // interface LegComputation {
+      //   leg: any;
+      //   instrument: InstrumentInfo;
+      //   isPositionOpen: boolean;
+      //   newToken: string;
+      //   newSymbol: string;
+      //   legLtpForCalc?: number; // leg.legLtp as it stood BEFORE this tick's update
+      //   rawQty?: number;
+      // }
+
+      // const computations: LegComputation[] = [];
+
+      // for (const leg of config.legsData || []) {
+      //   if (!['NFO', 'BFO', 'MCX'].includes(leg.exch)) continue;
+
+      //   // const otmPercent = Math.abs(config.otmDifference || 0);
+      //   // const diff = otmPercent > 0 ? mainLtp * (otmPercent / 100) : 0;
+      //   // let strike = leg.optionType === 'PE' ? mainLtp - diff : mainLtp + diff;
+
+      //   const otmPercent = Math.abs(config.otmDifference || 0);
+      //   const diff =
+      //     otmPercent > 0 ? adjustedUnderlyingPrice * (otmPercent / 100) : 0; // ⭐ was mainLtp
+      //   let strike =
+      //     leg.optionType === 'PE'
+      //       ? adjustedUnderlyingPrice - diff
+      //       : adjustedUnderlyingPrice + diff; // ⭐ was mainLtp
+
+      //   const matchedIndex = this.ensureIndexMasterEntry(config);
+      //   const roundStep = matchedIndex?.roundStep ?? 100;
+
+      //   strike =
+      //     otmPercent > 0
+      //       ? this.roundStrike(
+      //           strike,
+      //           roundStep,
+      //           leg.optionType === 'PE' ? 'down' : 'up',
+      //         )
+      //       : this.roundStrike(strike, roundStep, 'nearest');
+
+      //   const instrument = this.instrumentData.find(
+      //     (inst) =>
+      //       inst.exchange === leg.exch &&
+      //       inst.instrument === leg.instrument &&
+      //       inst.optionType === leg.optionType &&
+      //       inst.expiry === leg.expiry &&
+      //       inst.strikePrice === strike &&
+      //       inst.symbol === matchedIndex?.symbol,
+      //   );
+
+      //   if (!instrument) continue;
+
+      //   const isPositionOpen = await this.hasOpenPosition(
+      //     leg.exch,
+      //     leg.tokenNumber,
+      //   );
+
+      //   const newToken = String(instrument.token);
+      //   const newSymbol = instrument.tradingSymbol;
+
+      //   const effectiveAmount = this.getEffectiveAmountForLeg(config, leg);
+      //   const rawQty = this.calculateLegQuantity(
+      //     effectiveAmount,
+      //     leg.legLtp,
+      //     instrument.lotSize,
+      //   );
+
+      //   computations.push({
+      //     leg,
+      //     instrument,
+      //     isPositionOpen,
+      //     newToken,
+      //     newSymbol,
+      //     legLtpForCalc: leg.legLtp,
+      //     rawQty,
+      //   });
+      // }
+
+      // new to check lots size based on locked legs
       interface LegComputation {
         leg: any;
         instrument: InstrumentInfo;
         isPositionOpen: boolean;
         newToken: string;
         newSymbol: string;
-        legLtpForCalc?: number; // leg.legLtp as it stood BEFORE this tick's update
+        legLtpForCalc?: number;
         rawQty?: number;
       }
 
@@ -215,55 +293,81 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
       for (const leg of config.legsData || []) {
         if (!['NFO', 'BFO', 'MCX'].includes(leg.exch)) continue;
 
-        // const otmPercent = Math.abs(config.otmDifference || 0);
-        // const diff = otmPercent > 0 ? mainLtp * (otmPercent / 100) : 0;
-        // let strike = leg.optionType === 'PE' ? mainLtp - diff : mainLtp + diff;
-
-        const otmPercent = Math.abs(config.otmDifference || 0);
-        const diff =
-          otmPercent > 0 ? adjustedUnderlyingPrice * (otmPercent / 100) : 0; // ⭐ was mainLtp
-        let strike =
-          leg.optionType === 'PE'
-            ? adjustedUnderlyingPrice - diff
-            : adjustedUnderlyingPrice + diff; // ⭐ was mainLtp
-
-        const matchedIndex = this.ensureIndexMasterEntry(config);
-        const roundStep = matchedIndex?.roundStep ?? 100;
-
-        strike =
-          otmPercent > 0
-            ? this.roundStrike(
-                strike,
-                roundStep,
-                leg.optionType === 'PE' ? 'down' : 'up',
-              )
-            : this.roundStrike(strike, roundStep, 'nearest');
-
-        const instrument = this.instrumentData.find(
-          (inst) =>
-            inst.exchange === leg.exch &&
-            inst.instrument === leg.instrument &&
-            inst.optionType === leg.optionType &&
-            inst.expiry === leg.expiry &&
-            inst.strikePrice === strike &&
-            inst.symbol === matchedIndex?.symbol,
-        );
-
-        if (!instrument) continue;
-
         const isPositionOpen = await this.hasOpenPosition(
           leg.exch,
           leg.tokenNumber,
         );
 
+        let instrument: InstrumentInfo | undefined;
+
+        if (isPositionOpen) {
+          // ⭐ LOCKED: use the instrument that is actually held, never the new ATM
+          instrument = this.instrumentData.find(
+            (inst) =>
+              inst.exchange === leg.exch &&
+              String(inst.token) === String(leg.tokenNumber),
+          );
+          if (!instrument) {
+            this.logger.warn(
+              `Locked instrument not found for ${leg.exch}|${leg.tokenNumber}`,
+            );
+            continue;
+          }
+        } else {
+          // existing ATM/OTM strike derivation (unchanged)
+          const otmPercent = Math.abs(config.otmDifference || 0);
+          const diff =
+            otmPercent > 0 ? adjustedUnderlyingPrice * (otmPercent / 100) : 0;
+          let strike =
+            leg.optionType === 'PE'
+              ? adjustedUnderlyingPrice - diff
+              : adjustedUnderlyingPrice + diff;
+
+          const matchedIndex = this.ensureIndexMasterEntry(config);
+          const roundStep = matchedIndex?.roundStep ?? 100;
+
+          strike =
+            otmPercent > 0
+              ? this.roundStrike(
+                  strike,
+                  roundStep,
+                  leg.optionType === 'PE' ? 'down' : 'up',
+                )
+              : this.roundStrike(strike, roundStep, 'nearest');
+
+          instrument = this.instrumentData.find(
+            (inst) =>
+              inst.exchange === leg.exch &&
+              inst.instrument === leg.instrument &&
+              inst.optionType === leg.optionType &&
+              inst.expiry === leg.expiry &&
+              inst.strikePrice === strike &&
+              inst.symbol === matchedIndex?.symbol,
+          );
+          if (!instrument) continue;
+        }
+
         const newToken = String(instrument.token);
         const newSymbol = instrument.tradingSymbol;
+
+        // ⭐ price from THIS instrument's own tick (fresh, not last tick's value)
+        const legTick = this.marketDataMap.get(
+          `${leg.exch}|${instrument.token}`,
+        );
+        const freshLtp = legTick
+          ? leg.side === 'BUY'
+            ? (legTick.sp1 ?? legTick.lp)
+            : (legTick.bp1 ?? legTick.lp)
+          : leg.legLtp;
 
         const effectiveAmount = this.getEffectiveAmountForLeg(config, leg);
         const rawQty = this.calculateLegQuantity(
           effectiveAmount,
-          leg.legLtp,
+          freshLtp,
           instrument.lotSize,
+        );
+        this.logger.debug(
+          `${leg.optionType} locked=${isPositionOpen} tok=${instrument.token} ltp=${freshLtp} amt=${effectiveAmount} lot=${instrument.lotSize} raw=${rawQty}`,
         );
 
         computations.push({
@@ -272,7 +376,7 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
           isPositionOpen,
           newToken,
           newSymbol,
-          legLtpForCalc: leg.legLtp,
+          legLtpForCalc: freshLtp,
           rawQty,
         });
       }
@@ -337,7 +441,8 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
       // PHASE 3 — commit computed values back onto the legs
       // =====================================================
       for (const c of computations) {
-        const { leg, instrument, isPositionOpen, newToken, newSymbol } = c;
+        // const { leg, instrument, isPositionOpen, newToken, newSymbol } = c;
+        const { leg, isPositionOpen, newToken, newSymbol } = c;
 
         if (!isPositionOpen) {
           if (leg.tokenNumber !== newToken || leg.tradingSymbol !== newSymbol) {
@@ -357,13 +462,16 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
           isUpdated = true;
         }
 
-        const legKey = `${leg.exch}|${instrument.token}`;
-        const legTick = this.marketDataMap.get(legKey);
-        if (legTick) {
-          leg.legLtp =
-            leg.side === 'BUY'
-              ? (legTick.sp1 ?? legTick.lp ?? undefined)
-              : (legTick.bp1 ?? legTick.lp ?? undefined);
+        // const legKey = `${leg.exch}|${instrument.token}`;
+        // const legTick = this.marketDataMap.get(legKey);
+        // if (legTick) {
+        //   leg.legLtp =
+        //     leg.side === 'BUY'
+        //       ? (legTick.sp1 ?? legTick.lp ?? undefined)
+        //       : (legTick.bp1 ?? legTick.lp ?? undefined);
+        // }
+        if (c.legLtpForCalc !== undefined && leg.legLtp !== c.legLtpForCalc) {
+          leg.legLtp = c.legLtpForCalc;
         }
 
         isUpdated = true; // preserved from your original code
