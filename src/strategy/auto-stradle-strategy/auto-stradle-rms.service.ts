@@ -152,7 +152,9 @@ export class AutoStradleRMSService implements OnModuleInit {
       let hasOpenPosition = false;
 
       // const trades = this.exchangeDataService.getTrades();
-      const trades = this.exchangeDataService.getCachedTrades();
+      // const trades = this.exchangeDataService.getCachedTrades();
+      // now take data from local data instead of cached
+      const trades = await this.exchangeDataService.getCachedTrades();
 
       for (const leg of config.legsData) {
         const key = `${leg.exch}|${leg.tokenNumber}`;
@@ -525,7 +527,8 @@ export class AutoStradleRMSService implements OnModuleInit {
     }
 
     // const netPositions = await this.exchangeDataService.getNetPositions();
-    const netPositions = this.exchangeDataService.getCachedNetPositions();
+    // const netPositions = this.exchangeDataService.getCachedNetPositions();
+    const netPositions = await this.exchangeDataService.getCachedNetPositions();
 
     for (const config of relatedConfigs) {
       const hasOpenPosition = await this.updateConfigLiveData(

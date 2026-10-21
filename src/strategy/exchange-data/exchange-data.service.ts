@@ -12,6 +12,7 @@ import { ExchangeNetPosition } from './exchange-entities/exchange-net-position.e
 
 import { Cron } from '@nestjs/schedule';
 import { ConfigService } from '@nestjs/config';
+import { ExchangeLocalStoreHelper } from './exchange-local-store.helper';
 
 @Injectable()
 export class ExchangeDataService implements OnModuleInit {
@@ -19,9 +20,11 @@ export class ExchangeDataService implements OnModuleInit {
   private clientUid = ''; // for future use if needed in filter or anywhere else, can be set from env or config
 
   // ⭐ memory cache
-  private orderCache: any[] = [];
-  private tradeCache: any[] = [];
-  private netPositionCache: any[] = [];
+  // private orderCache: any[] = [];
+  // private tradeCache: any[] = [];
+  // private netPositionCache: any[] = [];
+
+  private inFlight = { order: false, trade: false, position: false };
 
   private lastCleanupDate = '';
 
@@ -58,6 +61,7 @@ export class ExchangeDataService implements OnModuleInit {
     private readonly ordersService: OrdersService,
     private readonly marketService: MarketService,
     private readonly configService: ConfigService,
+    private readonly localStore: ExchangeLocalStoreHelper,
   ) {
     this.clientUid = this.configService.get<string>('NOREN_CLIENT_ID') || '';
   }
@@ -70,13 +74,20 @@ export class ExchangeDataService implements OnModuleInit {
     try {
       this.logger.log('ExchangeDataService initialized');
 
+      // 👇 wipe local files first, so the current filter setting rebuilds everything
+      await this.localStore.resetAll();
+
       await this.cleanupStaleOrdersAndTrades(); // catches up after restarts/downtime
 
-      await Promise.all([
-        this.queue('order', () => this.syncOrderBook()),
-        this.queue('trade', () => this.syncTradeBook()),
-        this.queue('position', () => this.syncNetPositions()),
-      ]);
+      // await Promise.all([
+      //   this.queue('order', () => this.syncOrderBook()),
+      //   this.queue('trade', () => this.syncTradeBook()),
+      //   this.queue('position', () => this.syncNetPositions()),
+      // ]);
+      // now need to run one by one as dependency is their
+      await this.queue('order', () => this.syncOrderBook());
+      await this.queue('trade', () => this.syncTradeBook());
+      await this.queue('position', () => this.syncNetPositions());
     } catch (err) {
       this.logger.error('Module init failed', err?.stack || err);
     }
@@ -154,16 +165,31 @@ export class ExchangeDataService implements OnModuleInit {
   // SCHEDULER EVERY 2 SEC (background refresh for cached reads)
   // --------------------------------
 
+  // @Cron('*/2 * * * * *')
+  // async autoSyncScheduler() {
+  //   try {
+  //     // fire independently, don't serialize them behind each other
+  //     this.queue('order', () => this.syncOrderBook());
+  //     this.queue('trade', () => this.syncTradeBook());
+  //     this.queue('position', () => this.syncNetPositions());
+  //   } catch (err) {
+  //     this.logger.error('Scheduler error', err?.stack || err);
+  //   }
+  // }
+
   @Cron('*/2 * * * * *')
   async autoSyncScheduler() {
-    try {
-      // fire independently, don't serialize them behind each other
-      this.queue('order', () => this.syncOrderBook());
-      this.queue('trade', () => this.syncTradeBook());
-      this.queue('position', () => this.syncNetPositions());
-    } catch (err) {
-      this.logger.error('Scheduler error', err?.stack || err);
-    }
+    const run = (
+      k: 'order' | 'trade' | 'position',
+      fn: () => Promise<void>,
+    ) => {
+      if (this.inFlight[k]) return; // previous sync still running, skip this tick
+      this.inFlight[k] = true;
+      this.queue(k, fn).finally(() => (this.inFlight[k] = false));
+    };
+    run('order', () => this.syncOrderBook());
+    run('trade', () => this.syncTradeBook());
+    run('position', () => this.syncNetPositions());
   }
 
   // --------------------------------
@@ -184,6 +210,7 @@ export class ExchangeDataService implements OnModuleInit {
         this.tradeRepo.deleteMany({ tradeDate: { $ne: today } as any }),
       ]);
 
+      await this.localStore.cleanupStale(['orders', 'trades']);
       this.lastCleanupDate = today;
       this.logger.log(
         `Cleanup done. Deleted orders: ${o?.deletedCount ?? 0}, trades: ${t?.deletedCount ?? 0}`,
@@ -217,15 +244,16 @@ export class ExchangeDataService implements OnModuleInit {
   // --------------------------------
   // CACHE LOADER (used only if you ever need to hydrate from DB, e.g. after a restart)
   // --------------------------------
-  async loadAllCachesFromDB() {
-    try {
-      this.orderCache = await this.orderRepo.find();
-      this.tradeCache = await this.tradeRepo.find();
-      this.netPositionCache = await this.netPositionRepo.find();
-    } catch (err) {
-      this.logger.error('Cache load failed', err?.stack || err);
-    }
-  }
+  // disabled this function as nothing left in memory cache, now using local file for cache, so no need to load from DB
+  // async loadAllCachesFromDB() {
+  //   try {
+  //     this.orderCache = await this.orderRepo.find();
+  //     this.tradeCache = await this.tradeRepo.find();
+  //     this.netPositionCache = await this.netPositionRepo.find();
+  //   } catch (err) {
+  //     this.logger.error('Cache load failed', err?.stack || err);
+  //   }
+  // }
 
   // --------------------------------
   // FRESH GETTERS — always hit the broker, then return
@@ -250,34 +278,62 @@ export class ExchangeDataService implements OnModuleInit {
   // }
 
   // with heap memory control
+  // async getNetPositions() {
+  //   const now = Date.now();
+  //   if (now - this.lastPositionSyncAt < this.MIN_SYNC_INTERVAL_MS) {
+  //     return this.netPositionCache;
+  //   }
+  //   this.lastPositionSyncAt = now;
+  //   await this.queue('position', () => this.syncNetPositions());
+  //   return this.netPositionCache;
+  // }
   async getNetPositions() {
     const now = Date.now();
     if (now - this.lastPositionSyncAt < this.MIN_SYNC_INTERVAL_MS) {
-      return this.netPositionCache;
+      return this.localStore.readNetPositions();
     }
     this.lastPositionSyncAt = now;
-    await this.queue('position', () => this.syncNetPositions());
-    return this.netPositionCache;
+    await this.refreshPositions();
+    return this.localStore.readNetPositions();
   }
+
+  // async getOrders() {
+  //   const now = Date.now();
+  //   if (now - this.lastOrderSyncAt < this.MIN_SYNC_INTERVAL_MS) {
+  //     return this.orderCache;
+  //   }
+  //   this.lastOrderSyncAt = now;
+  //   await this.queue('order', () => this.syncOrderBook());
+  //   return this.orderCache;
+  // }
 
   async getOrders() {
     const now = Date.now();
     if (now - this.lastOrderSyncAt < this.MIN_SYNC_INTERVAL_MS) {
-      return this.orderCache;
+      return this.localStore.readOrders();
     }
     this.lastOrderSyncAt = now;
     await this.queue('order', () => this.syncOrderBook());
-    return this.orderCache;
+    return this.localStore.readOrders();
   }
 
+  // async getTrades() {
+  //   const now = Date.now();
+  //   if (now - this.lastTradeSyncAt < this.MIN_SYNC_INTERVAL_MS) {
+  //     return this.tradeCache;
+  //   }
+  //   this.lastTradeSyncAt = now;
+  //   await this.queue('trade', () => this.syncTradeBook());
+  //   return this.tradeCache;
+  // }
   async getTrades() {
     const now = Date.now();
     if (now - this.lastTradeSyncAt < this.MIN_SYNC_INTERVAL_MS) {
-      return this.tradeCache;
+      return this.localStore.readTrades();
     }
     this.lastTradeSyncAt = now;
     await this.queue('trade', () => this.syncTradeBook());
-    return this.tradeCache;
+    return this.localStore.readTrades();
   }
 
   // --------------------------------
@@ -285,91 +341,147 @@ export class ExchangeDataService implements OnModuleInit {
   // Use these for non-urgent reads (UI polling, logging, low-priority checks)
   // --------------------------------
 
-  getCachedNetPositions() {
-    return this.netPositionCache;
+  // getCachedNetPositions() {
+  //   return this.netPositionCache;
+  // }
+  async getCachedNetPositions() {
+    // now async, reads the local file
+    return this.localStore.readNetPositions();
   }
 
-  getCachedOrders() {
-    return this.orderCache;
+  // getCachedOrders() {
+  //   return this.orderCache;
+  // }
+  async getCachedOrders() {
+    // now async, reads the local file
+    return this.localStore.readOrders();
   }
 
-  getCachedTrades() {
-    return this.tradeCache;
+  // getCachedTrades() {
+  //   return this.tradeCache;
+  // }
+  async getCachedTrades() {
+    // now async, reads the local file
+    return this.localStore.readTrades();
   }
 
   // --------------------------------
   // SYNC METHODS
   // --------------------------------
 
+  // private async syncOrderBook() {
+  //   const data = await this.ordersService.getOrderBook();
+  //   const orders = data?.trades ?? [];
+
+  //   // ⭐ Update memory cache FIRST — this is what getOrders() is waiting on.
+  //   // DB persistence below does not block the getter.
+  //   this.orderCache = orders.map((order) => ({
+  //     norenordno: order.norenordno,
+  //     exchordid: order.exchordid,
+  //     tradeDate: new Date().toISOString().split('T')[0],
+  //     raw: order,
+  //   }));
+
+  //   // fire-and-forget persistence — history/audit only, not on the read path
+  //   // — serialized against other order-book persists, but never blocks the getter
+  //   this.queuePersist('order', () =>
+  //     this.syncCollection(this.orderRepo, orders),
+  //   );
+  // }
   private async syncOrderBook() {
     const data = await this.ordersService.getOrderBook();
     const orders = data?.trades ?? [];
 
-    // ⭐ Update memory cache FIRST — this is what getOrders() is waiting on.
-    // DB persistence below does not block the getter.
-    this.orderCache = orders.map((order) => ({
-      norenordno: order.norenordno,
-      exchordid: order.exchordid,
-      tradeDate: new Date().toISOString().split('T')[0],
-      raw: order,
-    }));
+    // local file replaces orderCache (filtered by ui_dev_code, append-only)
+    await this.localStore.mergeOrders(orders);
 
-    // fire-and-forget persistence — history/audit only, not on the read path
-    // — serialized against other order-book persists, but never blocks the getter
+    // Mongo persistence unchanged
     this.queuePersist('order', () =>
       this.syncCollection(this.orderRepo, orders),
     );
   }
 
+  // private async syncTradeBook() {
+  //   const data = await this.ordersService.getTradeBook();
+  //   const trades = data?.trades ?? [];
+
+  //   // ⭐ Update memory cache FIRST — this is what getTrades() is waiting on.
+  //   this.tradeCache = trades.map((trade) => ({
+  //     norenordno: trade.norenordno,
+  //     exchordid: trade.exchordid,
+  //     tradeDate: new Date().toISOString().split('T')[0],
+  //     raw: trade,
+  //   }));
+
+  //   // fire-and-forget persistence — serialized against other trade persists,
+  //   // never blocks the getter
+  //   this.queuePersist('trade', () =>
+  //     this.syncCollection(this.tradeRepo, trades),
+  //   );
+  // }
+
   private async syncTradeBook() {
     const data = await this.ordersService.getTradeBook();
     const trades = data?.trades ?? [];
 
-    // ⭐ Update memory cache FIRST — this is what getTrades() is waiting on.
-    this.tradeCache = trades.map((trade) => ({
-      norenordno: trade.norenordno,
-      exchordid: trade.exchordid,
-      tradeDate: new Date().toISOString().split('T')[0],
-      raw: trade,
-    }));
+    // local file replaces tradeCache (only trades matching saved orders, append-only)
+    const added = await this.localStore.mergeTrades(trades);
 
-    // fire-and-forget persistence — serialized against other trade persists,
-    // never blocks the getter
-    this.queuePersist('trade', () =>
-      this.syncCollection(this.tradeRepo, trades),
-    );
+    // Mongo: write only the newly added trades instead of the whole book every 2s
+    if (added.length) {
+      this.queuePersist('trade', () =>
+        this.syncCollection(this.tradeRepo, added),
+      );
+    }
   }
 
-  private async syncNetPositions() {
-    this.logger.warn('SYNC NETPOS START');
+  // private async syncNetPositions() {
+  //   this.logger.warn('SYNC NETPOS START');
 
-    const response = await this.ordersService.getNetPositions();
+  //   const response = await this.ordersService.getNetPositions();
 
-    this.logger.warn('BROKER RESPONSE RECEIVED');
+  //   this.logger.warn('BROKER RESPONSE RECEIVED');
 
-    const positions = response?.data ?? [];
-    this.logger.warn(`POSITIONS = ${positions.length}`);
+  //   const positions = response?.data ?? [];
+  //   this.logger.warn(`POSITIONS = ${positions.length}`);
 
-    const docs = positions.length
-      ? positions.map((pos) => ({
-          token: pos.token,
-          tsym: pos.tsym,
-          raw: pos,
-        }))
-      : [];
+  //   const docs = positions.length
+  //     ? positions.map((pos) => ({
+  //         token: pos.token,
+  //         tsym: pos.tsym,
+  //         raw: pos,
+  //       }))
+  //     : [];
 
-    // ⭐ Update cache FIRST — this is what getNetPositions() is waiting on.
-    // Persistence to Mongo below does not block the getter, and is
-    // serialized against any other in-flight net-position persist.
-    this.netPositionCache = docs;
+  //   // ⭐ Update cache FIRST — this is what getNetPositions() is waiting on.
+  //   // Persistence to Mongo below does not block the getter, and is
+  //   // serialized against any other in-flight net-position persist.
+  //   this.netPositionCache = docs;
 
-    this.queuePersist('position', () => this.persistNetPositions(docs));
+  //   this.queuePersist('position', () => this.persistNetPositions(docs));
 
-    this.logger.warn('SYNC NETPOS END');
-  }
+  //   this.logger.warn('SYNC NETPOS END');
+  // }
 
   // fire-and-forget DB persistence for net positions — history/audit only,
   // never on the read path. Cache is already fresh by the time this runs.
+  private async syncNetPositions() {
+    const response = await this.ordersService.getNetPositions();
+    const positions = response?.data ?? [];
+
+    const docs = positions.map((pos) => ({
+      token: pos.token,
+      tsym: pos.tsym,
+      raw: pos,
+    }));
+
+    // local file replaces netPositionCache (as is, or recalculated from trades)
+    await this.localStore.saveNetPositions(docs);
+
+    // Mongo persistence unchanged (broker data)
+    this.queuePersist('position', () => this.persistNetPositions(docs));
+  }
+
   private async persistNetPositions(docs: any[]) {
     await this.netPositionRepo.deleteMany({});
 
@@ -465,19 +577,45 @@ export class ExchangeDataService implements OnModuleInit {
   // PUBLIC FORCE SYNC (Websocket trigger)
   // --------------------------------
 
+  // async forceSyncFromWebsocket() {
+  //   try {
+  //     this.logger.log('Websocket triggered exchange sync');
+
+  //     await Promise.all([
+  //       this.queue('order', () => this.syncOrderBook()),
+  //       this.queue('trade', () => this.syncTradeBook()),
+  //       this.queue('position', () => this.syncNetPositions()),
+  //     ]);
+
+  //     // const orders = this.getCachedOrders();
+  //     const orders = await this.getCachedOrders();
+  //     const trades = this.getCachedTrades();
+  //     const netPositions = this.getCachedNetPositions();
+
+  //     this.logger.log(
+  //       `Sync complete. Orders: ${orders.length}, Trades: ${trades.length}, NetPositions: ${netPositions.length}`,
+  //     );
+  //   } catch (err) {
+  //     this.logger.error('forceSyncFromWebsocket failed', err?.stack || err);
+  //   }
+  // }
   async forceSyncFromWebsocket() {
     try {
       this.logger.log('Websocket triggered exchange sync');
 
-      await Promise.all([
-        this.queue('order', () => this.syncOrderBook()),
-        this.queue('trade', () => this.syncTradeBook()),
-        this.queue('position', () => this.syncNetPositions()),
-      ]);
+      // await this.queue('order', () => this.syncOrderBook());
+      // await Promise.all([
+      //   this.queue('trade', () => this.syncTradeBook()),
+      //   this.queue('position', () => this.syncNetPositions()),
+      // ]);
+      // now one by one to avoid race conditions in local file writes, as trades depend on orders and positions depend on trades
+      await this.queue('order', () => this.syncOrderBook());
+      await this.queue('trade', () => this.syncTradeBook());
+      await this.queue('position', () => this.syncNetPositions());
 
-      const orders = this.getCachedOrders();
-      const trades = this.getCachedTrades();
-      const netPositions = this.getCachedNetPositions();
+      const orders = await this.getCachedOrders();
+      const trades = await this.getCachedTrades();
+      const netPositions = await this.getCachedNetPositions();
 
       this.logger.log(
         `Sync complete. Orders: ${orders.length}, Trades: ${trades.length}, NetPositions: ${netPositions.length}`,
@@ -494,15 +632,31 @@ export class ExchangeDataService implements OnModuleInit {
   //   await this.queue('position', () => this.syncNetPositions());
   //   return this.netPositionCache;
   // }
+  // async forceNetPositionSync() {
+  //   this.lastPositionSyncAt = Date.now();
+  //   await this.queue('position', () => this.syncNetPositions());
+  //   return this.netPositionCache;
+  // }
+
   async forceNetPositionSync() {
     this.lastPositionSyncAt = Date.now();
-    await this.queue('position', () => this.syncNetPositions());
-    return this.netPositionCache;
+    await this.refreshPositions();
+    return this.localStore.readNetPositions();
   }
 
   private todayIST(): string {
     return new Intl.DateTimeFormat('en-CA', {
       timeZone: 'Asia/Kolkata',
     }).format(new Date()); // YYYY-MM-DD
+  }
+
+  // with the account filter on, net positions are derived from saved trades,
+  // so a forced refresh must refresh orders -> trades first
+  private async refreshPositions() {
+    if (this.localStore.isFilterEnabled()) {
+      await this.queue('order', () => this.syncOrderBook());
+      await this.queue('trade', () => this.syncTradeBook());
+    }
+    await this.queue('position', () => this.syncNetPositions());
   }
 }

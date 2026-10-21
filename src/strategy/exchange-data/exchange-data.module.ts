@@ -7,6 +7,7 @@ import { ExchangeOrder } from './exchange-entities/exchange-order.entity';
 import { ExchangeTrade } from './exchange-entities/exchange-trade.entity';
 import { ExchangeNetPosition } from './exchange-entities/exchange-net-position.entity';
 import { ExchangeDataController } from './exchange-data.controller';
+import { ExchangeLocalStoreHelper } from './exchange-local-store.helper';
 
 @Module({
   imports: [
@@ -16,8 +17,8 @@ import { ExchangeDataController } from './exchange-data.controller';
     TypeOrmModule.forFeature([ExchangeTrade]),
     TypeOrmModule.forFeature([ExchangeNetPosition]),
   ], // required
-  providers: [ExchangeDataService],
+  providers: [ExchangeDataService, ExchangeLocalStoreHelper],
   controllers: [ExchangeDataController],
-  exports: [ExchangeDataService],
+  exports: [ExchangeDataService, ExchangeLocalStoreHelper],
 })
 export class ExchangeDataModule {}
