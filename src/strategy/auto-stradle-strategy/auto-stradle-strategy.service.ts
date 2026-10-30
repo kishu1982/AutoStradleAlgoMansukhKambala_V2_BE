@@ -87,6 +87,8 @@ export class AutoStradleStrategyService {
         peAmountMultiplier: dto.peAmountMultiplier ?? 1,
         exitRatio: dto.exitRatio ?? 1.75,
         vwapTriggerPercentage: dto.vwapTriggerPercentage ?? 0.5, // ⭐ ADD THIS LINE
+        dayHighLowExitEnabled: dto.dayHighLowExitEnabled ?? true,
+        dayHighLowThresholdPercent: dto.dayHighLowThresholdPercent ?? 0,
       });
 
       const savedConfig = await this.autoStradleRepo.save(newConfig);
@@ -627,6 +629,8 @@ export class AutoStradleStrategyService {
     'peAmountMultiplier',
     'exitRatio',
     'vwapTriggerPercentage', // ⭐ NEW
+    'dayHighLowExitEnabled', // ⭐ NEW
+    'dayHighLowThresholdPercent', // ⭐ NEW
   ] as const;
 
   /**

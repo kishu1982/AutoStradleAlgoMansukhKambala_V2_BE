@@ -7,6 +7,7 @@ import {
   IsString,
   Min,
   ValidateNested,
+  IsBoolean,
 } from 'class-validator';
 import { AutoStradleLegDto } from './auto-stradle-leg.dto';
 
@@ -109,4 +110,13 @@ export class CreateAutoStradleStrategyDto {
   @Transform(({ value }) => value ?? 0)
   @IsNumber({}, { message: 'underlyingDifference must be a number' })
   underlyingDifference?: number = 0;
+
+  @IsOptional()
+  @IsBoolean()
+  dayHighLowExitEnabled?: boolean; // default false
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0, { message: 'dayHighLowThresholdPercent cannot be negative' })
+  dayHighLowThresholdPercent?: number; // 0.02 means 0.02%
 }

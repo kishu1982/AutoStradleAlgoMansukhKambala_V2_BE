@@ -9,6 +9,13 @@ import { OrdersService } from 'src/orders/orders.service';
 import { ConfigService } from '@nestjs/config';
 import { Interval } from '@nestjs/schedule';
 import { TelegramService } from 'src/telegram/telegram.service';
+
+interface UnderlyingDayRange {
+  dayHigh: number;
+  dayLow: number;
+  capturedAtIST: string;
+}
+
 @Injectable()
 export class AutoStradleRMSService implements OnModuleInit {
   private readonly logger = new Logger(AutoStradleRMSService.name);
@@ -37,6 +44,8 @@ export class AutoStradleRMSService implements OnModuleInit {
     'data',
     'AutoStradleTrade',
   );
+  // frozen per config until the position closes; survives the 5s activeConfigs refresh
+  private dayRangeStore = new Map<string, UnderlyingDayRange>();
 
   private readonly thresholdRatio: number;
   private readonly underlyingMovePercent: number;
@@ -74,6 +83,7 @@ export class AutoStradleRMSService implements OnModuleInit {
 
   async onModuleInit() {
     this.ensureFolder();
+    this.loadDayRangesFromDisk(); // ⭐ NEW for day high low
     this.activeConfigs = await this.autoStradleService.findActive();
     this.buildIndex();
   }
@@ -208,6 +218,7 @@ export class AutoStradleRMSService implements OnModuleInit {
 
       // ✅ UPDATE UNDERLYING INDEX PRICE
       this.updateUnderlyingPrice(config, hasOpenPosition);
+      this.syncUnderlyingDayRange(config, netPositions); // update dayhigh low in data of json
 
       // 🔥 Strategy level values
       config.liveValue = totalLiveValue;
@@ -461,6 +472,94 @@ export class AutoStradleRMSService implements OnModuleInit {
   private ensureFolder() {
     if (!fs.existsSync(this.SAVE_PATH)) {
       fs.mkdirSync(this.SAVE_PATH, { recursive: true });
+    }
+  }
+
+  // day range for high low exit
+  private loadDayRangesFromDisk() {
+    try {
+      for (const file of fs.readdirSync(this.SAVE_PATH)) {
+        if (!file.endsWith('.json')) continue;
+        try {
+          const json = JSON.parse(
+            fs.readFileSync(path.join(this.SAVE_PATH, file), 'utf-8'),
+          );
+          const r = json?.underlyingDayRange;
+          if (r?.dayHigh > 0 && r?.dayLow > 0 && r?.capturedAtIST) {
+            this.dayRangeStore.set(file.replace('.json', ''), {
+              dayHigh: Number(r.dayHigh),
+              dayLow: Number(r.dayLow),
+              capturedAtIST: r.capturedAtIST,
+            });
+          }
+        } catch (e) {
+          this.logger.warn(`Could not rehydrate day range from ${file}`);
+        }
+      }
+    } catch (e) {
+      this.logger.error('loadDayRangesFromDisk error', e?.stack || e);
+    }
+  }
+
+  // sync data of day high low range in json
+  //Capture, freeze and build the JSON block:
+  private syncUnderlyingDayRange(config: any, netPositions: any[]) {
+    try {
+      const id = String(config._id);
+      const anyNetOpen = (config.legsData || []).some(
+        (l: any) => this.getNetQty(netPositions, l) !== 0,
+      );
+
+      if (!anyNetOpen) {
+        // only clear once the positions cache is actually loaded, otherwise a
+        // restart would wipe the frozen range before positions sync
+        if (netPositions.length > 0) this.dayRangeStore.delete(id);
+        delete config.underlyingDayRange;
+        return;
+      }
+
+      const nowIST = this.getISTTime();
+      let range = this.dayRangeStore.get(id);
+
+      // a carried-over (NRML) position gets a fresh range on a new trading day
+      if (range && range.capturedAtIST.slice(0, 10) !== nowIST.slice(0, 10)) {
+        this.dayRangeStore.delete(id);
+        range = undefined;
+      }
+
+      if (!range) {
+        const tick = this.priceMap.get(
+          `${config.exchange}|${config.tokenNumber}`,
+        );
+        const h = Number(tick?.h);
+        const l = Number(tick?.l);
+        if (!(h > 0) || !(l > 0)) {
+          this.logger.warn(`Day high/low not available yet for ${config._id}`);
+          return; // retry on next tick
+        }
+        range = { dayHigh: h, dayLow: l, capturedAtIST: nowIST };
+        this.dayRangeStore.set(id, range);
+        this.logger.log(
+          `📌 Day range frozen for ${config._id}: high=${h} low=${l}`,
+        );
+      }
+
+      const enabled = !!config.dayHighLowExitEnabled;
+      const pct = Number(config.dayHighLowThresholdPercent || 0);
+      const r2 = (n: number) => Number(n.toFixed(2));
+
+      config.underlyingDayRange = {
+        dayHigh: range.dayHigh,
+        dayLow: range.dayLow,
+        exitEnabled: enabled,
+        thresholdPercent: pct,
+        highTriggerLevel: enabled ? r2(range.dayHigh * (1 + pct / 100)) : null,
+        lowTriggerLevel: enabled ? r2(range.dayLow * (1 - pct / 100)) : null,
+        capturedAtIST: range.capturedAtIST, // frozen
+        lastUpdatedIST: nowIST, // every tick
+      };
+    } catch (error) {
+      this.logger.error('syncUnderlyingDayRange error', error?.stack || error);
     }
   }
 
@@ -855,6 +954,9 @@ runExitChecks()
 
       if (config.exitStatus === 'EXITING') return;
 
+      await this.checkDayHighLowExit(config); // ⭐ NEW
+      if (config.exitStatus === 'EXITING') return;
+
       await this.checkPnLExit(config);
 
       // future:
@@ -1011,6 +1113,9 @@ LOCKED → ignored
       }
 
       config.exitStatus = 'EXITING';
+
+      // just to update reason
+      config.exitReason = reason;
 
       this.logger.warn(`🚨 RMS EXIT (${reason}) ${config._id}`);
 
@@ -2637,5 +2742,32 @@ Place exit again
   // sleep fucntions
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private async checkDayHighLowExit(config: any) {
+    if (!config.dayHighLowExitEnabled) return;
+
+    const r = config.underlyingDayRange;
+    if (!r || r.highTriggerLevel == null || r.lowTriggerLevel == null) return;
+
+    const ltp = Number(
+      this.priceMap.get(`${config.exchange}|${config.tokenNumber}`)?.lp,
+    );
+    if (!(ltp > 0)) return;
+
+    if (ltp >= r.highTriggerLevel) {
+      await this.squareOffConfig(
+        config,
+        `UNDERLYING_DAY_HIGH_BREACHED day high=${r.dayHigh} trigger=${r.highTriggerLevel} (+${r.thresholdPercent}%) ltp=${ltp}`,
+      );
+      return;
+    }
+
+    if (ltp <= r.lowTriggerLevel) {
+      await this.squareOffConfig(
+        config,
+        `UNDERLYING_DAY_LOW_BREACHED day low=${r.dayLow} trigger=${r.lowTriggerLevel} (-${r.thresholdPercent}%) ltp=${ltp}`,
+      );
+    }
   }
 }

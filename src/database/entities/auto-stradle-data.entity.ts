@@ -97,6 +97,12 @@ export class AutoStradleDataEntity {
   @Column({ type: 'date', nullable: true })
   vwapUpdatedAt?: Date; // useful for staleness checks/debugging
 
+  @Column({ default: true })
+  dayHighLowExitEnabled?: boolean;
+
+  @Column({ default: 0 })
+  dayHighLowThresholdPercent?: number;
+
   // timestamps for record keeping
   @CreateDateColumn()
   createdAt: Date;
