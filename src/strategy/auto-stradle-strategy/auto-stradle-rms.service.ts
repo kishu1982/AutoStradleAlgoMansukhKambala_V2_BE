@@ -28,6 +28,8 @@ export class AutoStradleRMSService implements OnModuleInit {
   // for clearing or controling heep memory
   private inFlightTokens = new Set<string>(); // ⭐ ADD — prevents tick pile-up
 
+  private isFlushing = false; // ⭐ NEW
+
   // max order per second
   private readonly MAX_ORDERS_PER_SECOND = 10;
 
@@ -385,38 +387,85 @@ export class AutoStradleRMSService implements OnModuleInit {
     this.dirtyConfigs.set(id, config);
   }
 
+  // @Interval(1000)
+  // async flushJsonFiles() {
+  //   if (this.dirtyConfigs.size > 0) {
+  //     const configs = [...this.dirtyConfigs.values()];
+  //     this.dirtyConfigs.clear();
+
+  //     await Promise.all(
+  //       configs.map(async (config) => {
+  //         const file = path.join(this.SAVE_PATH, `${config._id}.json`);
+  //         const tmpFile = `${file}.tmp`;
+
+  //         await fs.promises.writeFile(tmpFile, JSON.stringify(config, null, 2));
+  //         await fs.promises.rename(tmpFile, file);
+  //       }),
+  //     );
+  //   }
+
+  //   if (this.pendingDeletes.size > 0) {
+  //     const ids = [...this.pendingDeletes.values()];
+  //     this.pendingDeletes.clear();
+
+  //     await Promise.all(
+  //       ids.map(async (id) => {
+  //         const file = path.join(this.SAVE_PATH, `${id}.json`);
+  //         try {
+  //           await fs.promises.rm(file, { force: true });
+  //           this.logger.log(`🧹 Removed closed trade file: ${id}`);
+  //         } catch (err) {
+  //           this.logger.error('removeConfigFile error', err?.stack || err);
+  //         }
+  //       }),
+  //     );
+  //   }
+  // }
+
   @Interval(1000)
   async flushJsonFiles() {
-    if (this.dirtyConfigs.size > 0) {
-      const configs = [...this.dirtyConfigs.values()];
-      this.dirtyConfigs.clear();
+    if (this.isFlushing) return; // ⭐ NEW — skip if previous flush still running
+    this.isFlushing = true;
 
-      await Promise.all(
-        configs.map(async (config) => {
-          const file = path.join(this.SAVE_PATH, `${config._id}.json`);
-          const tmpFile = `${file}.tmp`;
+    try {
+      if (this.dirtyConfigs.size > 0) {
+        const configs = [...this.dirtyConfigs.values()];
+        this.dirtyConfigs.clear();
 
-          await fs.promises.writeFile(tmpFile, JSON.stringify(config, null, 2));
-          await fs.promises.rename(tmpFile, file);
-        }),
-      );
-    }
+        await Promise.all(
+          configs.map(async (config) => {
+            const file = path.join(this.SAVE_PATH, `${config._id}.json`);
+            const tmpFile = `${file}.tmp`;
 
-    if (this.pendingDeletes.size > 0) {
-      const ids = [...this.pendingDeletes.values()];
-      this.pendingDeletes.clear();
+            await fs.promises.writeFile(
+              tmpFile,
+              JSON.stringify(config, null, 2),
+            );
+            await fs.promises.rename(tmpFile, file);
+          }),
+        );
+      }
 
-      await Promise.all(
-        ids.map(async (id) => {
-          const file = path.join(this.SAVE_PATH, `${id}.json`);
-          try {
-            await fs.promises.rm(file, { force: true });
-            this.logger.log(`🧹 Removed closed trade file: ${id}`);
-          } catch (err) {
-            this.logger.error('removeConfigFile error', err?.stack || err);
-          }
-        }),
-      );
+      if (this.pendingDeletes.size > 0) {
+        const ids = [...this.pendingDeletes.values()];
+        this.pendingDeletes.clear();
+
+        await Promise.all(
+          ids.map(async (id) => {
+            const file = path.join(this.SAVE_PATH, `${id}.json`);
+            try {
+              await fs.promises.rm(file, { force: true });
+              this.logger.log(`🧹 Removed closed trade file: ${id}`);
+            } catch (err) {
+              this.logger.error('removeConfigFile error', err?.stack || err);
+            }
+          }),
+        );
+      }
+    } catch (err) {
+      this.logger.error('flushJsonFiles error', err?.stack || err);
+    } finally {
+      this.isFlushing = false; // ⭐ NEW
     }
   }
 
