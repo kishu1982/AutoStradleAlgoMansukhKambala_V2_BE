@@ -1025,38 +1025,103 @@ runExitChecks()
   //   await this.squareOffConfig(config, 'RATIO_THRESHOLD');
   // }
 
+  // Detect CE / PE leg. Adjust if your legsData uses a different field/value.
+  private getLegOptionType(leg: any): 'CE' | 'PE' | null {
+    const t = String(leg.optionType ?? '').toUpperCase();
+    if (t === 'CE' || t === 'CALL' || t === 'C') return 'CE';
+    if (t === 'PE' || t === 'PUT' || t === 'P') return 'PE';
+
+    // fallback: look at trading symbol, e.g. NIFTY24NOV26C24500 / ...P24500
+    const s = String(leg.tradingSymbol ?? '').toUpperCase();
+    if (/(CE|C\d+)$/.test(s)) return 'CE';
+    if (/(PE|P\d+)$/.test(s)) return 'PE';
+    return null;
+  }
+
   // new version of checking ratio with invested ration value
+  // old version to check with invested ration with live ration
+  // private async checkRatioExit(config: any) {
+  //   // ⭐ CHANGED: exitRatio is now a DEVIATION BAND (± around each leg's
+  //   // invested-value ratio), not an absolute ceiling like before.
+  //   // Exit fires when a leg's live valueRatio drifts more than
+  //   // ±deviationThreshold away from its valueRatioInvested baseline.
+  //   //
+  //   // e.g. investedRatio = 1.10, deviationThreshold = 0.25
+  //   //   → exit if liveRatio >= 1.35  OR  liveRatio <= 0.85
+  //   const deviationThreshold = Number(
+  //     config.exitRatio ?? this.thresholdRatio ?? 0.5,
+  //   );
+
+  //   let triggeredLeg: any = null;
+  //   let triggeredInfo = '';
+
+  //   for (const leg of config.legsData || []) {
+  //     const investedRatio = Number(leg.valueRatioInvested || 0);
+  //     const liveRatio = Number(leg.valueRatio || 0);
+
+  //     // No valid invested baseline yet (e.g. right after entry, before
+  //     // avg price / investedValue settled) → skip, can't evaluate drift
+  //     if (!investedRatio) continue;
+
+  //     const upperBound = investedRatio + deviationThreshold;
+  //     const lowerBound = investedRatio - deviationThreshold;
+
+  //     if (liveRatio >= upperBound || liveRatio <= lowerBound) {
+  //       triggeredLeg = leg;
+  //       triggeredInfo =
+  //         `leg=${leg.tradingSymbol} liveRatio=${liveRatio.toFixed(4)} ` +
+  //         `investedRatio=${investedRatio.toFixed(4)} ` +
+  //         `band=[${lowerBound.toFixed(4)}, ${upperBound.toFixed(4)}]`;
+  //       break;
+  //     }
+  //   }
+
+  //   if (!triggeredLeg) return;
+
+  //   await this.squareOffConfig(
+  //     config,
+  //     `RATIO_DEVIATION(${deviationThreshold}) ${triggeredInfo}`,
+  //   );
+  // }
+  // Ratio exit: BAND around a baseline built from the stored
+  // ceAmountMultiplier / peAmountMultiplier (instead of the invested ratio).
+  // Exit when a leg's live valueRatio drifts more than ±exitRatio from its baseline.
+  //
+  // e.g. ce=1.20, pe=1, exitRatio=0.5
+  //   CE leg: base=1.20 → exit if liveRatio >= 1.70 OR <= 0.70
+  //   PE leg: base=0.833 → exit if liveRatio >= 1.333 OR <= 0.333
   private async checkRatioExit(config: any) {
-    // ⭐ CHANGED: exitRatio is now a DEVIATION BAND (± around each leg's
-    // invested-value ratio), not an absolute ceiling like before.
-    // Exit fires when a leg's live valueRatio drifts more than
-    // ±deviationThreshold away from its valueRatioInvested baseline.
-    //
-    // e.g. investedRatio = 1.10, deviationThreshold = 0.25
-    //   → exit if liveRatio >= 1.35  OR  liveRatio <= 0.85
     const deviationThreshold = Number(
       config.exitRatio ?? this.thresholdRatio ?? 0.5,
     );
+
+    const ceMult = Number(config.ceAmountMultiplier ?? 1) || 1;
+    const peMult = Number(config.peAmountMultiplier ?? 1) || 1;
 
     let triggeredLeg: any = null;
     let triggeredInfo = '';
 
     for (const leg of config.legsData || []) {
-      const investedRatio = Number(leg.valueRatioInvested || 0);
+      const type = this.getLegOptionType(leg);
+      if (!type) continue; // can't tell CE/PE → can't pick a baseline
+
       const liveRatio = Number(leg.valueRatio || 0);
 
-      // No valid invested baseline yet (e.g. right after entry, before
-      // avg price / investedValue settled) → skip, can't evaluate drift
-      if (!investedRatio) continue;
+      // No live ratio yet (other leg has no live value / tick missing) → skip.
+      // Needed now because the baseline is always non-zero, so a 0 live ratio
+      // would otherwise fall below the lower bound and trigger a false exit.
+      if (!liveRatio) continue;
 
-      const upperBound = investedRatio + deviationThreshold;
-      const lowerBound = investedRatio - deviationThreshold;
+      const baseRatio = type === 'CE' ? ceMult / peMult : peMult / ceMult;
+
+      const upperBound = baseRatio + deviationThreshold;
+      const lowerBound = baseRatio - deviationThreshold;
 
       if (liveRatio >= upperBound || liveRatio <= lowerBound) {
         triggeredLeg = leg;
         triggeredInfo =
-          `leg=${leg.tradingSymbol} liveRatio=${liveRatio.toFixed(4)} ` +
-          `investedRatio=${investedRatio.toFixed(4)} ` +
+          `leg=${leg.tradingSymbol} type=${type} liveRatio=${liveRatio.toFixed(4)} ` +
+          `baseRatio=${baseRatio.toFixed(4)} (ce=${ceMult}, pe=${peMult}) ` +
           `band=[${lowerBound.toFixed(4)}, ${upperBound.toFixed(4)}]`;
         break;
       }
