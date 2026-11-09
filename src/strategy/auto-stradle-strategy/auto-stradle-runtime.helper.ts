@@ -28,6 +28,9 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
 
   private isCronRunning = false; // prevent overlap
 
+  // ATM band: if underlying is within this % of the mround strike, CE & PE share that strike
+  private readonly ATM_BAND_PERCENT = 0.05;
+
   // private readonly indexMaster = [
   //   { exchange: 'NSE', symbol: 'NIFTY', token: 26000 },
   //   { exchange: 'NFO', symbol: 'NIFTY', token: 61093 },
@@ -326,6 +329,24 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
           const matchedIndex = this.ensureIndexMasterEntry(config);
           const roundStep = matchedIndex?.roundStep ?? 100;
 
+          // old logic to keep equal only ce and pe strike price when underlying is within 0.05% of the mround strike
+          // strike =
+          //   otmPercent > 0
+          //     ? this.roundStrike(
+          //         strike,
+          //         roundStep,
+          //         leg.optionType === 'PE' ? 'down' : 'up',
+          //       )
+          //     : this.roundStrike(strike, roundStep, 'nearest');
+
+          /*
+Checking your examples (NIFTY, step 50)
+Underlying	mround	Band (±)	Result
+24440	24450	12.225	diff 10 is inside the band, so CE = PE = 24450
+24425	24450	12.225	diff 25 is outside the band, so CE = 24450, PE = 24400
+24470	24450	12.225	diff 20 is outside the band, so CE = 24500, PE = 24450
+*/
+
           strike =
             otmPercent > 0
               ? this.roundStrike(
@@ -333,7 +354,11 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
                   roundStep,
                   leg.optionType === 'PE' ? 'down' : 'up',
                 )
-              : this.roundStrike(strike, roundStep, 'nearest');
+              : this.getZeroOtmStrike(
+                  adjustedUnderlyingPrice, // already includes underlyingDifference
+                  roundStep,
+                  leg.optionType,
+                );
 
           instrument = this.instrumentData.find(
             (inst) =>
@@ -1014,5 +1039,23 @@ export class AutoStradleRuntimeHelper implements OnModuleInit {
 
     // default for BANKNIFTY, SENSEX, and any other/unknown symbol
     return 100;
+  }
+
+  // get automatic update of strike price based on underlying price and step size
+  private getZeroOtmStrike(
+    underlying: number,
+    step: number,
+    optionType: string,
+  ): number {
+    const mround = this.roundStrike(underlying, step, 'nearest');
+    const band = mround * (this.ATM_BAND_PERCENT / 100); // e.g. 24450 * 0.05% = 12.225
+
+    // inside band -> both legs on the mround strike
+    if (Math.abs(underlying - mround) <= band) return mround;
+
+    // outside band -> PE nearest strike below, CE nearest strike above
+    return optionType === 'PE'
+      ? this.roundStrike(underlying, step, 'down')
+      : this.roundStrike(underlying, step, 'up');
   }
 }
