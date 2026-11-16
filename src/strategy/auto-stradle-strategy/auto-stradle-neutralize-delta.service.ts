@@ -4,17 +4,13 @@ import { ConfigService } from '@nestjs/config';
 import { AutoStradleStrategyService } from './auto-stradle-strategy.service';
 import { AutoStradleExecutionService } from './auto-stradle-execution.service';
 import { ExchangeDataService } from '../exchange-data/exchange-data.service';
-import { MarketService } from 'src/market/market.service';
 import { AutoStradleDataEntity } from 'src/database/entities/auto-stradle-data.entity';
 
 interface RunningLeg {
   leg: any;
-  netQty: number;
   lotSize: number;
-  ltp: number;
-  bid?: number;
-  ask?: number;
-  invested: number; // |netqty| * ltp
+  livePrice: number;
+  liveValue: number;
 }
 
 @Injectable()
@@ -22,19 +18,18 @@ export class AutoStradleNeutralizeDeltaService {
   private readonly logger = new Logger(AutoStradleNeutralizeDeltaService.name);
 
   private isRunning = false;
-  private lastCheckAt = new Map<string, number>(); // configId -> ms
-  private lastOrderAt = new Map<string, number>(); // configId -> ms
-  private readonly MIN_GAP_AFTER_ORDER_MS = 5000; // let positions refresh before re-evaluating
+  private lastCheckAt = new Map<string, number>();
+  private lastOrderAt = new Map<string, number>();
+  private readonly MIN_GAP_AFTER_ORDER_MS = 8000; // JSON must refresh after a fill
+  private readonly MAX_JSON_AGE_MS = 20000; // ignore stale RMS data
 
   constructor(
     private readonly strategyService: AutoStradleStrategyService,
     private readonly executionService: AutoStradleExecutionService,
     private readonly exchangeDataService: ExchangeDataService,
-    private readonly marketService: MarketService,
     private readonly configService: ConfigService,
   ) {}
 
-  // ticks every second; each config is throttled by its own interval
   @Cron(CronExpression.EVERY_SECOND)
   async scheduledRun(): Promise<void> {
     if (this.isRunning) return;
@@ -63,61 +58,74 @@ export class AutoStradleNeutralizeDeltaService {
 
   private async processConfig(config: AutoStradleDataEntity): Promise<void> {
     const id = config._id.toString();
+    const tag = `[ND ${config.strategyName}]`;
 
-    // don't fight an entry order that is still being built
-    if (this.executionService.isExecutionRunning(config)) return;
+    if (this.executionService.isExecutionRunning(config)) {
+      this.logger.debug(`${tag} skip: entry execution still running`);
+      return;
+    }
     if (
       Date.now() - (this.lastOrderAt.get(id) ?? 0) <
       this.MIN_GAP_AFTER_ORDER_MS
-    )
+    ) {
+      this.logger.debug(`${tag} skip: waiting after last neutralize order`);
       return;
+    }
 
-    // 1) running legs + live values
-    const running = await this.getRunningLegs(config);
-    if (!running || running.length < 2) return; // both legs must be open
+    // 1) running legs from RMS json
+    const running = await this.getRunningLegsFromJson(config, tag);
+    if (!running) return; // reason already logged
 
     const [a, b] = running;
-    const weak = a.invested <= b.invested ? a : b;
+    const weak = a.liveValue <= b.liveValue ? a : b;
     const strong = weak === a ? b : a;
-    if (strong.invested <= 0) return;
+    if (strong.liveValue <= 0) {
+      this.logger.debug(`${tag} skip: strong leg liveValue <= 0`);
+      return;
+    }
 
-    // 2) live ratio (<= 1)
-    const ratio = weak.invested / strong.invested;
+    // 2) live ratio (<= 1) == smaller valueRatio in json
+    const ratio = weak.liveValue / strong.liveValue;
 
-    // 3) trigger check
+    // 3) trigger
     const triggerValue = config.neutralizeTriggerRatio ?? 0.91;
     const direction = config.neutralizeTriggerDirection ?? 'BELOW';
     const triggered =
       direction === 'BELOW' ? ratio < triggerValue : ratio > triggerValue;
 
     this.logger.debug(
-      `[ND ${config.strategyName}] ratio=${ratio.toFixed(3)} (${direction} ${triggerValue}) ` +
-        `weak=${weak.leg.tradingSymbol}:${weak.invested.toFixed(0)} strong=${strong.leg.tradingSymbol}:${strong.invested.toFixed(0)}`,
+      `${tag} ratio=${ratio.toFixed(3)} (${direction} ${triggerValue}) triggered=${triggered} ` +
+        `weak=${weak.leg.tradingSymbol}:${weak.liveValue.toFixed(0)} strong=${strong.leg.tradingSymbol}:${strong.liveValue.toFixed(0)}`,
     );
     if (!triggered) return;
 
-    // 4) quantity = lot size (from net position) * lots per trade
+    // 4) qty = lot size * lots per trade
     const lots = config.neutralizeLotsPerTrade ?? 1;
     const qty = weak.lotSize * lots;
-    if (qty <= 0) return;
+    if (qty <= 0) {
+      this.logger.warn(
+        `${tag} skip: qty<=0 (lotSize=${weak.lotSize}, lots=${lots})`,
+      );
+      return;
+    }
 
-    // 5) max live investment guard (total of both legs + this order)
+    // 5) max live investment guard
     const maxInvest = config.neutralizeMaxInvestment ?? 150000;
-    const totalInvested = weak.invested + strong.invested;
-    const projected = totalInvested + qty * weak.ltp;
+    const totalLive = weak.liveValue + strong.liveValue;
+    const projected = totalLive + qty * weak.livePrice;
     if (projected > maxInvest) {
       this.logger.warn(
-        `[ND ${config.strategyName}] max investment reached: total=${totalInvested.toFixed(0)} ` +
+        `${tag} TRIGGERED but max investment reached: live=${totalLive.toFixed(0)} ` +
           `projected=${projected.toFixed(0)} max=${maxInvest} - skipping`,
       );
       return;
     }
 
-    // 6) one IOC order, same symbol / exchange / side as the running weak leg
+    // 6) one IOC order on the weak leg (same symbol / exchange / side)
     const remarks = `NEUTRALIZED DELTA r=${ratio.toFixed(3)} ${direction} ${triggerValue}`;
     this.logger.warn(
-      `[ND ${config.strategyName}] placing ${weak.leg.side} ${qty} ${weak.leg.tradingSymbol} | ${remarks} ` +
-        `| bid=${weak.bid} ask=${weak.ask} ltp=${weak.ltp} total=${totalInvested.toFixed(0)}`,
+      `${tag} placing ${weak.leg.side} ${qty} ${weak.leg.tradingSymbol} | ${remarks} | ` +
+        `livePrice=${weak.livePrice} totalLive=${totalLive.toFixed(0)}`,
     );
 
     this.lastOrderAt.set(id, Date.now());
@@ -127,77 +135,111 @@ export class AutoStradleNeutralizeDeltaService {
       qty,
       remarks,
     );
-    this.logger.debug(
-      `[ND ${config.strategyName}] order response: ${JSON.stringify(res)}`,
-    );
+    this.logger.debug(`${tag} order response: ${JSON.stringify(res)}`);
   }
 
   // =====================================================
-  // Running legs data: netqty + live quote -> invested value
-  // (swap this method if you prefer reading the trade JSON)
+  // Read running legs from the RMS trade json (data/AutoStradleTrade)
   // =====================================================
-  private async getRunningLegs(
+  private async getRunningLegsFromJson(
     config: AutoStradleDataEntity,
+    tag: string,
   ): Promise<RunningLeg[] | null> {
     try {
-      const positions = await this.exchangeDataService.getNetPositions();
-      if (!Array.isArray(positions)) return null;
+      const res = await this.executionService.getActiveTradeData();
+      if (!res?.success || !Array.isArray(res.data)) {
+        this.logger.debug(`${tag} skip: no trade json found`);
+        return null;
+      }
+
+      const id = config._id.toString();
+      const entry = res.data.find((f: any) => String(f.data?._id) === id);
+      const tradeJson = entry?.data;
+      if (!tradeJson) {
+        this.logger.debug(`${tag} skip: no trade json for this config`);
+        return null;
+      }
+
+      // staleness guard
+      const updatedStr = tradeJson.underlyingDayRange?.lastUpdatedIST;
+      const updatedMs = updatedStr ? new Date(updatedStr).getTime() : NaN;
+      if (
+        !Number.isNaN(updatedMs) &&
+        Date.now() - updatedMs > this.MAX_JSON_AGE_MS
+      ) {
+        this.logger.warn(
+          `${tag} skip: trade json stale (${Math.round((Date.now() - updatedMs) / 1000)}s old)`,
+        );
+        return null;
+      }
+
+      const legs = tradeJson.legsData;
+      if (!Array.isArray(legs) || legs.length < 2) {
+        this.logger.debug(`${tag} skip: json has <2 legs`);
+        return null;
+      }
 
       const result: RunningLeg[] = [];
+      for (const leg of legs) {
+        const openQty = Math.abs(Number(leg.openNetQty ?? 0));
+        const liveValue = Number(leg.liveValue);
+        const livePrice = Number(leg.livePrice);
 
-      for (const leg of config.legsData || []) {
-        if (!leg.tokenNumber || !leg.exch) return null;
-
-        const pos = positions.find(
-          (p: any) =>
-            String(p.token ?? '').trim() === String(leg.tokenNumber).trim() &&
-            String(p.raw?.exch ?? '')
-              .trim()
-              .toUpperCase() === String(leg.exch).trim().toUpperCase(),
-        );
-        const netQty = Number(pos?.raw?.netqty ?? 0);
-        if (!pos || netQty === 0) return null; // leg not running -> nothing to neutralize
-
-        // direction sanity: SELL leg must be net short, BUY leg net long
-        if (
-          (leg.side === 'SELL' && netQty > 0) ||
-          (leg.side === 'BUY' && netQty < 0)
-        ) {
-          this.logger.warn(
-            `[ND] ${leg.tradingSymbol} position direction != config side, skipping`,
+        if (!(openQty > 0)) {
+          this.logger.debug(
+            `${tag} skip: ${leg.tradingSymbol} not open (openNetQty=${leg.openNetQty})`,
+          );
+          return null;
+        }
+        if (!(liveValue > 0) || !(livePrice > 0)) {
+          this.logger.debug(
+            `${tag} skip: ${leg.tradingSymbol} liveValue/livePrice missing`,
           );
           return null;
         }
 
-        const quote = await this.marketService.getQuotes({
-          exch: leg.exch,
-          token: leg.tokenNumber,
-        });
-        const ltp = Number(quote?.lp);
-        if (!quote || quote.stat !== 'Ok' || !(ltp > 0)) return null;
-
-        const lotSize =
-          Number(pos.raw?.ls) ||
-          this.executionService.getLotSizeFor(leg.tokenNumber, leg.exch);
-
         result.push({
           leg,
-          netQty,
-          lotSize,
-          ltp,
-          bid: Number(quote.bp1) || undefined,
-          ask: Number(quote.sp1) || undefined,
-          invested: Math.abs(netQty) * ltp,
+          lotSize: await this.resolveLotSize(leg),
+          livePrice,
+          liveValue,
         });
       }
       return result;
     } catch (err: any) {
-      this.logger.error('getRunningLegs error', err?.stack || err);
+      this.logger.error(
+        `${tag} getRunningLegsFromJson error`,
+        err?.stack || err,
+      );
       return null;
     }
   }
 
-  // global kill switch from .env
+  // lot size: instruments map first, then net position "ls"
+  private async resolveLotSize(leg: any): Promise<number> {
+    const fromMap = this.executionService.getLotSizeFor(
+      leg.tokenNumber,
+      leg.exch,
+    );
+    if (fromMap > 1) return fromMap;
+
+    try {
+      const positions = await this.exchangeDataService.getNetPositions();
+      const pos = Array.isArray(positions)
+        ? positions.find(
+            (p: any) =>
+              String(p.token ?? '').trim() === String(leg.tokenNumber).trim() &&
+              String(p.raw?.exch ?? '')
+                .trim()
+                .toUpperCase() === String(leg.exch).trim().toUpperCase(),
+          )
+        : undefined;
+      return Number(pos?.raw?.ls) || fromMap;
+    } catch {
+      return fromMap;
+    }
+  }
+
   private isGloballyEnabled(): boolean {
     return (
       String(this.configService.get('AUTO_NEUTRALIZE_DELTA', 'false'))
