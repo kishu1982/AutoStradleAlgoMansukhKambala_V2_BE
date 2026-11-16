@@ -16,6 +16,7 @@ import { AutoSquareOffService } from './auto-square-off.service';
 import { AutoSquareOffAllPositionsService } from './Auto-square-off-all-positions.service';
 import { VwapCacheService } from './vwap-cache.service';
 import { AutoStradleUnderlyingDiffService } from './auto-stradle-underlying-diff.service';
+import { AutoStradleNeutralizeDeltaService } from './auto-stradle-neutralize-delta.service';
 
 @Module({
   imports: [
@@ -36,6 +37,7 @@ import { AutoStradleUnderlyingDiffService } from './auto-stradle-underlying-diff
     AutoSquareOffAllPositionsService, // ⭐ ADD THIS
     VwapCacheService, // ⭐ NEW
     AutoStradleUnderlyingDiffService, // ⭐ add
+    AutoStradleNeutralizeDeltaService, // neutralization of delta for stradle positions
   ],
   exports: [AutoStradleStrategyService, AutoStradleRuntimeHelper],
 })

@@ -1427,4 +1427,51 @@ export class AutoStradleExecutionService implements OnModuleInit {
 
     this.orderCounter += orderCount;
   }
+
+  // ---- used by neutralize-delta service ----
+  isExecutionRunning(config: any): boolean {
+    return this.activeExecutions.has(this.buildExecutionKey(config));
+  }
+
+  getLotSizeFor(token: string, exchange: string): number {
+    return this.getLotSize(token, exchange);
+  }
+
+  async placeSingleLegIoc(config: any, leg: any, qty: number, remarks: string) {
+    try {
+      if (!this.executionEnabled) {
+        this.logger.warn('Execution disabled - single leg IOC skipped');
+        return null;
+      }
+      const price = await this.getLimitPrice(
+        leg.exch,
+        leg.tokenNumber,
+        leg.side,
+      );
+      if (price === undefined) {
+        this.logger.error(
+          `No price for ${leg.tradingSymbol}, single leg IOC skipped`,
+        );
+        return null;
+      }
+      await this.throttleOrders(1);
+      return await this.ordersService.placeOrder({
+        buy_or_sell: leg.side === 'BUY' ? 'B' : 'S',
+        product_type: this.resolveProductType(config.productType),
+        exchange: leg.exch,
+        tradingsymbol: leg.tradingSymbol,
+        quantity: qty,
+        price_type: 'LMT',
+        price,
+        trigger_price: 0,
+        discloseqty: 0,
+        retention: 'IOC',
+        amo: 'NO',
+        remarks,
+      });
+    } catch (err) {
+      this.logger.error('placeSingleLegIoc error', err?.stack || err);
+      return null;
+    }
+  }
 }

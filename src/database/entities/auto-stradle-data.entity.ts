@@ -103,6 +103,14 @@ export class AutoStradleDataEntity {
   @Column({ default: 0 })
   dayHighLowThresholdPercent?: number;
 
+  // dalta neutralization support
+  @Column() neutralizeDeltaEnabled?: boolean; // default false
+  @Column() neutralizeLotsPerTrade?: number; // default 1
+  @Column() neutralizeTriggerRatio?: number; // default 0.91
+  @Column() neutralizeTriggerDirection?: 'BELOW' | 'ABOVE'; // default BELOW
+  @Column() neutralizeCheckIntervalSec?: number; // default 10
+  @Column() neutralizeMaxInvestment?: number; // default 150000
+
   // timestamps for record keeping
   @CreateDateColumn()
   createdAt: Date;

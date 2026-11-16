@@ -89,6 +89,12 @@ export class AutoStradleStrategyService {
         vwapTriggerPercentage: dto.vwapTriggerPercentage ?? 0.5, // ⭐ ADD THIS LINE
         dayHighLowExitEnabled: dto.dayHighLowExitEnabled ?? true,
         dayHighLowThresholdPercent: dto.dayHighLowThresholdPercent ?? 0,
+        neutralizeDeltaEnabled: dto.neutralizeDeltaEnabled ?? false,
+        neutralizeLotsPerTrade: dto.neutralizeLotsPerTrade ?? 1,
+        neutralizeTriggerRatio: dto.neutralizeTriggerRatio ?? 0.91,
+        neutralizeTriggerDirection: dto.neutralizeTriggerDirection ?? 'BELOW',
+        neutralizeCheckIntervalSec: dto.neutralizeCheckIntervalSec ?? 10,
+        neutralizeMaxInvestment: dto.neutralizeMaxInvestment ?? 150000,
       });
 
       const savedConfig = await this.autoStradleRepo.save(newConfig);
@@ -631,6 +637,12 @@ export class AutoStradleStrategyService {
     'vwapTriggerPercentage', // ⭐ NEW
     'dayHighLowExitEnabled', // ⭐ NEW
     'dayHighLowThresholdPercent', // ⭐ NEW
+    'neutralizeDeltaEnabled', // delta neutralization support
+    'neutralizeLotsPerTrade',
+    'neutralizeTriggerRatio',
+    'neutralizeTriggerDirection',
+    'neutralizeCheckIntervalSec',
+    'neutralizeMaxInvestment',
   ] as const;
 
   /**

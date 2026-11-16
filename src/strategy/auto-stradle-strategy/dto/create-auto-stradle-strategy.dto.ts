@@ -8,6 +8,7 @@ import {
   Min,
   ValidateNested,
   IsBoolean,
+  IsIn,
 } from 'class-validator';
 import { AutoStradleLegDto } from './auto-stradle-leg.dto';
 
@@ -119,4 +120,14 @@ export class CreateAutoStradleStrategyDto {
   @IsNumber()
   @Min(0, { message: 'dayHighLowThresholdPercent cannot be negative' })
   dayHighLowThresholdPercent?: number; // 0.02 means 0.02%
+
+  // delta neutralization support
+  @IsOptional() @IsBoolean() neutralizeDeltaEnabled?: boolean;
+  @IsOptional() @IsNumber() @Min(1) neutralizeLotsPerTrade?: number;
+  @IsOptional() @IsNumber() @Min(0) neutralizeTriggerRatio?: number;
+  @IsOptional() @IsIn(['BELOW', 'ABOVE']) neutralizeTriggerDirection?:
+    | 'BELOW'
+    | 'ABOVE';
+  @IsOptional() @IsNumber() @Min(1) neutralizeCheckIntervalSec?: number;
+  @IsOptional() @IsNumber() @Min(0) neutralizeMaxInvestment?: number;
 }
