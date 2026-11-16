@@ -110,22 +110,37 @@ export class AutoStradleNeutralizeDeltaService {
     }
 
     // 5) max live investment guard
+    // const maxInvest = config.neutralizeMaxInvestment ?? 150000;
+    // const totalLive = weak.liveValue + strong.liveValue;
+    // const projected = totalLive + qty * weak.livePrice;
+    // if (projected > maxInvest) {
+    //   this.logger.warn(
+    //     `${tag} TRIGGERED but max investment reached: live=${totalLive.toFixed(0)} ` +
+    //       `projected=${projected.toFixed(0)} max=${maxInvest} - skipping`,
+    //   );
+    //   return;
+    // }
+    // 5) max live investment guard - per leg (only the leg being added to)
     const maxInvest = config.neutralizeMaxInvestment ?? 150000;
-    const totalLive = weak.liveValue + strong.liveValue;
-    const projected = totalLive + qty * weak.livePrice;
-    if (projected > maxInvest) {
+    const legLive = weak.liveValue;
+    const projectedLeg = legLive + qty * weak.livePrice;
+    if (projectedLeg > maxInvest) {
       this.logger.warn(
-        `${tag} TRIGGERED but max investment reached: live=${totalLive.toFixed(0)} ` +
-          `projected=${projected.toFixed(0)} max=${maxInvest} - skipping`,
+        `${tag} TRIGGERED but leg cap reached on ${weak.leg.tradingSymbol}: ` +
+          `legLive=${legLive.toFixed(0)} projected=${projectedLeg.toFixed(0)} max=${maxInvest} - skipping`,
       );
       return;
     }
 
     // 6) one IOC order on the weak leg (same symbol / exchange / side)
     const remarks = `NEUTRALIZED DELTA r=${ratio.toFixed(3)} ${direction} ${triggerValue}`;
+    // this.logger.warn(
+    //   `${tag} placing ${weak.leg.side} ${qty} ${weak.leg.tradingSymbol} | ${remarks} | ` +
+    //     `livePrice=${weak.livePrice} totalLive=${totalLive.toFixed(0)}`,
+    // );
     this.logger.warn(
       `${tag} placing ${weak.leg.side} ${qty} ${weak.leg.tradingSymbol} | ${remarks} | ` +
-        `livePrice=${weak.livePrice} totalLive=${totalLive.toFixed(0)}`,
+        `livePrice=${weak.livePrice} legLive=${legLive.toFixed(0)}`,
     );
 
     this.lastOrderAt.set(id, Date.now());
