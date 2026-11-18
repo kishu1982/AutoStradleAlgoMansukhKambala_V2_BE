@@ -56,6 +56,105 @@ export class AutoStradleNeutralizeDeltaService {
     }
   }
 
+  // condition with weaker leg side
+  // private async processConfig(config: AutoStradleDataEntity): Promise<void> {
+  //   const id = config._id.toString();
+  //   const tag = `[ND ${config.strategyName}]`;
+
+  //   if (this.executionService.isExecutionRunning(config)) {
+  //     this.logger.debug(`${tag} skip: entry execution still running`);
+  //     return;
+  //   }
+  //   if (
+  //     Date.now() - (this.lastOrderAt.get(id) ?? 0) <
+  //     this.MIN_GAP_AFTER_ORDER_MS
+  //   ) {
+  //     this.logger.debug(`${tag} skip: waiting after last neutralize order`);
+  //     return;
+  //   }
+
+  //   // 1) running legs from RMS json
+  //   const running = await this.getRunningLegsFromJson(config, tag);
+  //   if (!running) return; // reason already logged
+
+  //   const [a, b] = running;
+  //   const weak = a.liveValue <= b.liveValue ? a : b;
+  //   const strong = weak === a ? b : a;
+  //   if (strong.liveValue <= 0) {
+  //     this.logger.debug(`${tag} skip: strong leg liveValue <= 0`);
+  //     return;
+  //   }
+
+  //   // 2) live ratio (<= 1) == smaller valueRatio in json
+  //   const ratio = weak.liveValue / strong.liveValue;
+
+  //   // 3) trigger
+  //   const triggerValue = config.neutralizeTriggerRatio ?? 0.91;
+  //   const direction = config.neutralizeTriggerDirection ?? 'BELOW';
+  //   const triggered =
+  //     direction === 'BELOW' ? ratio < triggerValue : ratio > triggerValue;
+
+  //   this.logger.debug(
+  //     `${tag} ratio=${ratio.toFixed(3)} (${direction} ${triggerValue}) triggered=${triggered} ` +
+  //       `weak=${weak.leg.tradingSymbol}:${weak.liveValue.toFixed(0)} strong=${strong.leg.tradingSymbol}:${strong.liveValue.toFixed(0)}`,
+  //   );
+  //   if (!triggered) return;
+
+  //   // 4) qty = lot size * lots per trade
+  //   const lots = config.neutralizeLotsPerTrade ?? 1;
+  //   const qty = weak.lotSize * lots;
+  //   if (qty <= 0) {
+  //     this.logger.warn(
+  //       `${tag} skip: qty<=0 (lotSize=${weak.lotSize}, lots=${lots})`,
+  //     );
+  //     return;
+  //   }
+
+  //   // 5) max live investment guard
+  //   // const maxInvest = config.neutralizeMaxInvestment ?? 150000;
+  //   // const totalLive = weak.liveValue + strong.liveValue;
+  //   // const projected = totalLive + qty * weak.livePrice;
+  //   // if (projected > maxInvest) {
+  //   //   this.logger.warn(
+  //   //     `${tag} TRIGGERED but max investment reached: live=${totalLive.toFixed(0)} ` +
+  //   //       `projected=${projected.toFixed(0)} max=${maxInvest} - skipping`,
+  //   //   );
+  //   //   return;
+  //   // }
+  //   // 5) max live investment guard - per leg (only the leg being added to)
+  //   const maxInvest = config.neutralizeMaxInvestment ?? 150000;
+  //   const legLive = weak.liveValue;
+  //   const projectedLeg = legLive + qty * weak.livePrice;
+  //   if (projectedLeg > maxInvest) {
+  //     this.logger.warn(
+  //       `${tag} TRIGGERED but leg cap reached on ${weak.leg.tradingSymbol}: ` +
+  //         `legLive=${legLive.toFixed(0)} projected=${projectedLeg.toFixed(0)} max=${maxInvest} - skipping`,
+  //     );
+  //     return;
+  //   }
+
+  //   // 6) one IOC order on the weak leg (same symbol / exchange / side)
+  //   const remarks = `NEUTRALIZED DELTA r=${ratio.toFixed(3)} ${direction} ${triggerValue}`;
+  //   // this.logger.warn(
+  //   //   `${tag} placing ${weak.leg.side} ${qty} ${weak.leg.tradingSymbol} | ${remarks} | ` +
+  //   //     `livePrice=${weak.livePrice} totalLive=${totalLive.toFixed(0)}`,
+  //   // );
+  //   this.logger.warn(
+  //     `${tag} placing ${weak.leg.side} ${qty} ${weak.leg.tradingSymbol} | ${remarks} | ` +
+  //       `livePrice=${weak.livePrice} legLive=${legLive.toFixed(0)}`,
+  //   );
+
+  //   this.lastOrderAt.set(id, Date.now());
+  //   const res = await this.executionService.placeSingleLegIoc(
+  //     config,
+  //     weak.leg,
+  //     qty,
+  //     remarks,
+  //   );
+  //   this.logger.debug(`${tag} order response: ${JSON.stringify(res)}`);
+  // }
+
+  // conditions with stronger leg side.
   private async processConfig(config: AutoStradleDataEntity): Promise<void> {
     const id = config._id.toString();
     const tag = `[ND ${config.strategyName}]`;
@@ -77,82 +176,79 @@ export class AutoStradleNeutralizeDeltaService {
     if (!running) return; // reason already logged
 
     const [a, b] = running;
-    const weak = a.liveValue <= b.liveValue ? a : b;
-    const strong = weak === a ? b : a;
-    if (strong.liveValue <= 0) {
-      this.logger.debug(`${tag} skip: strong leg liveValue <= 0`);
+    if (a.liveValue <= 0 || b.liveValue <= 0) {
+      this.logger.debug(`${tag} skip: a leg liveValue <= 0`);
       return;
     }
 
-    // 2) live ratio (<= 1) == smaller valueRatio in json
-    const ratio = weak.liveValue / strong.liveValue;
+    // 2) per-leg live ratio = this leg liveValue / other leg liveValue
+    //    (same as "valueRatio" in the json)
+    const ratioA = a.liveValue / b.liveValue;
+    const ratioB = b.liveValue / a.liveValue;
 
-    // 3) trigger
+    // 3) trigger: find the leg whose own ratio satisfies the condition
     const triggerValue = config.neutralizeTriggerRatio ?? 0.91;
     const direction = config.neutralizeTriggerDirection ?? 'BELOW';
-    const triggered =
-      direction === 'BELOW' ? ratio < triggerValue : ratio > triggerValue;
+    const isHit = (r: number) =>
+      direction === 'BELOW' ? r < triggerValue : r > triggerValue;
 
     this.logger.debug(
-      `${tag} ratio=${ratio.toFixed(3)} (${direction} ${triggerValue}) triggered=${triggered} ` +
-        `weak=${weak.leg.tradingSymbol}:${weak.liveValue.toFixed(0)} strong=${strong.leg.tradingSymbol}:${strong.liveValue.toFixed(0)}`,
+      `${tag} ${a.leg.tradingSymbol} ratio=${ratioA.toFixed(3)} | ` +
+        `${b.leg.tradingSymbol} ratio=${ratioB.toFixed(3)} | ${direction} ${triggerValue}`,
     );
-    if (!triggered) return;
+
+    const candidates = [
+      { rl: a, ratio: ratioA },
+      { rl: b, ratio: ratioB },
+    ].filter((c) => isHit(c.ratio));
+
+    if (!candidates.length) return; // not triggered
+
+    // if both legs ever qualify (e.g. ABOVE with trigger < 1), take the most extreme
+    candidates.sort((x, y) =>
+      direction === 'BELOW' ? x.ratio - y.ratio : y.ratio - x.ratio,
+    );
+    const target = candidates[0].rl;
+    const ratio = candidates[0].ratio;
 
     // 4) qty = lot size * lots per trade
     const lots = config.neutralizeLotsPerTrade ?? 1;
-    const qty = weak.lotSize * lots;
+    const qty = target.lotSize * lots;
     if (qty <= 0) {
       this.logger.warn(
-        `${tag} skip: qty<=0 (lotSize=${weak.lotSize}, lots=${lots})`,
+        `${tag} skip: qty<=0 (lotSize=${target.lotSize}, lots=${lots})`,
       );
       return;
     }
 
-    // 5) max live investment guard
-    // const maxInvest = config.neutralizeMaxInvestment ?? 150000;
-    // const totalLive = weak.liveValue + strong.liveValue;
-    // const projected = totalLive + qty * weak.livePrice;
-    // if (projected > maxInvest) {
-    //   this.logger.warn(
-    //     `${tag} TRIGGERED but max investment reached: live=${totalLive.toFixed(0)} ` +
-    //       `projected=${projected.toFixed(0)} max=${maxInvest} - skipping`,
-    //   );
-    //   return;
-    // }
     // 5) max live investment guard - per leg (only the leg being added to)
     const maxInvest = config.neutralizeMaxInvestment ?? 150000;
-    const legLive = weak.liveValue;
-    const projectedLeg = legLive + qty * weak.livePrice;
+    const legLive = target.liveValue;
+    const projectedLeg = legLive + qty * target.livePrice;
     if (projectedLeg > maxInvest) {
       this.logger.warn(
-        `${tag} TRIGGERED but leg cap reached on ${weak.leg.tradingSymbol}: ` +
+        `${tag} TRIGGERED but leg cap reached on ${target.leg.tradingSymbol}: ` +
           `legLive=${legLive.toFixed(0)} projected=${projectedLeg.toFixed(0)} max=${maxInvest} - skipping`,
       );
       return;
     }
 
-    // 6) one IOC order on the weak leg (same symbol / exchange / side)
+    // 6) one IOC order on the triggered leg (same symbol / exchange / side)
     const remarks = `NEUTRALIZED DELTA r=${ratio.toFixed(3)} ${direction} ${triggerValue}`;
-    // this.logger.warn(
-    //   `${tag} placing ${weak.leg.side} ${qty} ${weak.leg.tradingSymbol} | ${remarks} | ` +
-    //     `livePrice=${weak.livePrice} totalLive=${totalLive.toFixed(0)}`,
-    // );
     this.logger.warn(
-      `${tag} placing ${weak.leg.side} ${qty} ${weak.leg.tradingSymbol} | ${remarks} | ` +
-        `livePrice=${weak.livePrice} legLive=${legLive.toFixed(0)}`,
+      `${tag} placing ${target.leg.side} ${qty} ${target.leg.tradingSymbol} | ${remarks} | ` +
+        `livePrice=${target.livePrice} legLive=${legLive.toFixed(0)}`,
     );
 
     this.lastOrderAt.set(id, Date.now());
     const res = await this.executionService.placeSingleLegIoc(
       config,
-      weak.leg,
+      target.leg,
       qty,
       remarks,
     );
     this.logger.debug(`${tag} order response: ${JSON.stringify(res)}`);
   }
-
   // =====================================================
   // Read running legs from the RMS trade json (data/AutoStradleTrade)
   // =====================================================
