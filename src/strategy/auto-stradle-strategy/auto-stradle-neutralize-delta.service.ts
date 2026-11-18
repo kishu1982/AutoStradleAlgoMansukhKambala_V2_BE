@@ -11,6 +11,7 @@ interface RunningLeg {
   lotSize: number;
   livePrice: number;
   liveValue: number;
+  valueRatio: number; // from the RMS json
 }
 
 @Injectable()
@@ -183,8 +184,11 @@ export class AutoStradleNeutralizeDeltaService {
 
     // 2) per-leg live ratio = this leg liveValue / other leg liveValue
     //    (same as "valueRatio" in the json)
-    const ratioA = a.liveValue / b.liveValue;
-    const ratioB = b.liveValue / a.liveValue;
+    // const ratioA = a.liveValue / b.liveValue;
+    // const ratioB = b.liveValue / a.liveValue;
+    // use the json valueRatio when present, fall back to our own calculation
+    const ratioA = a.valueRatio > 0 ? a.valueRatio : a.liveValue / b.liveValue;
+    const ratioB = b.valueRatio > 0 ? b.valueRatio : b.liveValue / a.liveValue;
 
     // 3) trigger: find the leg whose own ratio satisfies the condition
     const triggerValue = config.neutralizeTriggerRatio ?? 0.91;
@@ -192,7 +196,11 @@ export class AutoStradleNeutralizeDeltaService {
     const isHit = (r: number) =>
       direction === 'BELOW' ? r < triggerValue : r > triggerValue;
 
-    this.logger.debug(
+    // this.logger.debug(
+    //   `${tag} ${a.leg.tradingSymbol} ratio=${ratioA.toFixed(3)} | ` +
+    //     `${b.leg.tradingSymbol} ratio=${ratioB.toFixed(3)} | ${direction} ${triggerValue}`,
+    // );
+    this.logger.warn(
       `${tag} ${a.leg.tradingSymbol} ratio=${ratioA.toFixed(3)} | ` +
         `${b.leg.tradingSymbol} ratio=${ratioB.toFixed(3)} | ${direction} ${triggerValue}`,
     );
@@ -241,13 +249,24 @@ export class AutoStradleNeutralizeDeltaService {
     );
 
     this.lastOrderAt.set(id, Date.now());
-    const res = await this.executionService.placeSingleLegIoc(
+    // const res = await this.executionService.placeSingleLegIoc(
+    //   config,
+    //   target.leg,
+    //   qty,
+    //   remarks,
+    // );
+    // this.logger.debug(`${tag} order response: ${JSON.stringify(res)}`);
+    const res: any = await this.executionService.placeSingleLegIoc(
       config,
       target.leg,
       qty,
       remarks,
     );
-    this.logger.debug(`${tag} order response: ${JSON.stringify(res)}`);
+    if (!res || (res.stat && res.stat !== 'Ok')) {
+      this.logger.error(`${tag} order NOT accepted: ${JSON.stringify(res)}`);
+    } else {
+      this.logger.warn(`${tag} order accepted: ${JSON.stringify(res)}`);
+    }
   }
   // =====================================================
   // Read running legs from the RMS trade json (data/AutoStradleTrade)
@@ -314,6 +333,7 @@ export class AutoStradleNeutralizeDeltaService {
           lotSize: await this.resolveLotSize(leg),
           livePrice,
           liveValue,
+          valueRatio: Number(leg.valueRatio),
         });
       }
       return result;
